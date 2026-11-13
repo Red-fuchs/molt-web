@@ -28,7 +28,7 @@
       <button data-view="props">Vorschläge <span id="todo" class="badge hidden"></span></button>
     </nav>
     <div id="chans"></div>
-    <form id="newtopic"><input id="ntname" placeholder="+ neues Thema" maxlength="64"></form>
+    <button id="newtopic" class="link" type="button">+ Kanal</button>
     <h3>Mitglieder</h3>
     <div id="members"></div>
     <footer>
@@ -60,6 +60,7 @@
     </form>
   </main>
 </div>
+<div id="modal" class="overlay hidden" role="dialog" aria-modal="true"><div id="mbox"></div></div>
 <div id="toast" class="hidden"></div>
 <script src="/app.js"></script>
 </body>

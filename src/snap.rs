@@ -4,7 +4,9 @@ use molt_client::text::one;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-pub struct Fetched { pub state: Value, pub files: HashMap<String, FileMeta>, pub images: HashMap<String, String> }
+/// Per-proposal facts the write endpoints check before calling the daemon: (open, still to vote, own and pending).
+pub type PropInfo = (bool, bool, bool);
+pub struct Fetched { pub pinfo: HashMap<u64, PropInfo>, pub state: Value, pub files: HashMap<String, FileMeta>, pub images: HashMap<String, String> }
 
 pub fn ckey(c: &Chan) -> String {
     match c { Chan::Group => "g".into(), Chan::Topic(n) => format!("t:{n}"), Chan::Patch(i) => format!("p:{i}") }
@@ -66,7 +68,9 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
     let mut sorted: Vec<&Prop> = props.iter().collect();
     sorted.sort_by(|a, b| b.open().cmp(&a.open()).then(b.id.cmp(&a.id)));
     let props_j: Vec<Value> = sorted.iter().map(|p| json!({"id":p.id,"state":p.state,"by":p.by,"op":p.op,"summary":p.summary,
-        "approvals":p.approvals,"threshold":p.threshold,"votes":p.votes,"todo":p.todo(),"chan":format!("p:{}", p.id)})).collect();
+        "approvals":p.approvals,"threshold":p.threshold,"votes":p.votes,"todo":p.todo(),"can_withdraw":p.can_withdraw(&status.member),
+        "approved_by_me":p.approved_by_me,"declined_by_me":p.declined_by_me,"chan":format!("p:{}", p.id)})).collect();
+    let pinfo = props.iter().map(|p| (p.id, (p.open(), p.todo(), p.can_withdraw(&status.member)))).collect();
     let mut images = HashMap::new();
     let mem_j: Vec<Value> = mem.iter().map(|m| {
         if !m.image.is_empty() { images.insert(m.name.clone(), m.image.clone()) ; }
@@ -76,7 +80,18 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
     let state = json!({"name":status.name,"seat":status.member,"retention_days":st.get("chat_retention_days"),
         "health":{"relays":status.relays,"missing_relays":status.missing_relays,"diverged":status.diverged,"lag":status.lag,"active_1h":status.active_1h},
         "wiki_rev":wiki_rev,"chans":chans_j,"msgs":out,"props":props_j,"members":mem_j,"todo":todo});
-    Fetched { state, files, images }
+    Fetched { pinfo, state, files, images }
+}
+
+const MAX_DETAIL: usize = 60_000;
+fn capn(s: &str) -> String { if s.chars().count() <= MAX_DETAIL { s.into() } else { s.chars().take(MAX_DETAIL).collect::<String>() + "\n[... truncated]" } }
+
+/// Full proposal for the detail view (payload text, before/after, stances); all text sanitised by `parse_prop`.
+pub fn detail(p: &Prop, seat: &str) -> Value {
+    json!({"id":p.id,"state":p.state,"by":p.by,"surface":p.surface,"op":p.op,"summary":p.summary,"paths":p.paths,
+        "approvals":p.approvals,"threshold":p.threshold,"votes":p.votes,"approved_by_me":p.approved_by_me,"declined_by_me":p.declined_by_me,
+        "todo":p.todo(),"can_withdraw":p.can_withdraw(seat),"superseded":p.superseded,
+        "value":capn(&p.value),"current":capn(&p.current),"proposed":capn(&p.proposed)})
 }
 
 pub fn fetch(m: &Mcp) -> Result<Fetched, String> {

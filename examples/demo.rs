@@ -29,6 +29,11 @@ fn main() {
         "chat_send" => { eprintln!("MOCK chat_send {a}"); json!({"ok":true}) }
         _ => json!({"ok":true}),
     }));
+    // stateful republic (votes, proposals, topics work end to end); the fixture handler above supplies the seeded chat and files
+    let mut sim = mock::sim::Sim::new("seat");
+    sim.msgs = h("read_state", &json!({})).unwrap()["applied"].as_array().unwrap().clone();
+    sim.uploads = h("read_uploads", &json!({})).unwrap()["uploads"].as_array().unwrap().clone();
+    let (h, _) = sim.into_handler(Some(h));
     let m = mock::start("demo-token", h);
     let cache = std::env::temp_dir().join("molt-web-demo-cache");
     let listen = std::env::var("DEMO_LISTEN").unwrap_or_else(|_| "127.0.0.1:8481".into());

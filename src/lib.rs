@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use config::Config;
+use molt_client::compose;
 use molt_client::mcp::Mcp;
 use molt_client::model::{tag_body, FileMeta};
 use molt_client::text::clean;
@@ -30,7 +31,7 @@ struct Shared {
     tx: watch::Sender<Arc<String>>, shutdown: watch::Sender<bool>,
     kdf: Semaphore, uploads: Semaphore, persistent: RwLock<HashSet<String>>,
     files: RwLock<HashMap<String, FileMeta>>, images: RwLock<HashMap<String, String>>,
-    msg_ids: RwLock<HashSet<String>>,
+    msg_ids: RwLock<HashSet<String>>, pinfo: RwLock<HashMap<u64, snap::PropInfo>>, seat: RwLock<String>,
     nudge: Mutex<mpsc::Sender<()>>, dl: tokio::sync::Mutex<()>,
 }
 type S = State<Arc<Shared>>;
@@ -105,7 +106,8 @@ fn guard(st: &Shared, h: &HeaderMap, write: bool) -> Result<auth::Session, E> {
 }
 
 fn me_json(st: &Shared, s: &auth::Session) -> Value {
-    json!({"user":s.user,"tag":s.user,"csrf":s.csrf,"read_only":st.cfg.read_only,"downloads":st.cfg.downloads,"max_upload":st.cfg.max_upload})
+    json!({"user":s.user,"tag":s.user,"csrf":s.csrf,"read_only":st.cfg.read_only,"downloads":st.cfg.downloads,"max_upload":st.cfg.max_upload,
+        "kinds":compose::ALL.iter().map(|k| { let (a, b) = k.fields(); json!({"id":k.id(),"label":k.label(),"a":a,"b":b,"advanced":k.advanced()}) }).collect::<Vec<_>>()})
 }
 
 async fn login(State(st): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Result<Response, E> {
@@ -204,6 +206,86 @@ async fn send(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<V
     call(&st, "chat_send", a).await?;
     let _ = st.nudge.lock().unwrap().send(());
     Ok(Json(json!({"ok":true})))
+}
+
+fn need_confirm(b: &Value) -> Result<(), E> {
+    if b["confirm"] == json!(true) { Ok(()) } else { Err(e(StatusCode::BAD_REQUEST, "Bestätigung fehlt (confirm: true)")) }
+}
+fn prop_id(b: &Value) -> Result<u64, E> { b["id"].as_u64().ok_or_else(|| e(StatusCode::BAD_REQUEST, "Vorschlags-ID fehlt")) }
+fn note(b: &Value) -> Result<String, E> {
+    let n = clean(b["note"].as_str().unwrap_or("")).trim().to_string();
+    if n.chars().count() > 2000 { return Err(e(StatusCode::BAD_REQUEST, "Begründung zu lang")) }
+    Ok(n)
+}
+fn info(st: &Shared, id: u64) -> Result<snap::PropInfo, E> {
+    st.pinfo.read().unwrap().get(&id).copied().ok_or_else(|| e(StatusCode::NOT_FOUND, "Vorschlag unbekannt"))
+}
+
+async fn proposal(State(st): S, h: HeaderMap, Path(id): Path<u64>) -> Result<Json<Value>, E> {
+    guard(&st, &h, false)?;
+    info(&st, id)?;
+    let v = call(&st, "read_proposal", json!({"id": id})).await?;
+    let seat = st.seat.read().unwrap().clone();
+    Ok(Json(snap::detail(&molt_client::model::parse_prop(&v), &seat)))
+}
+
+/// Real signature: needs `confirm: true`, an open proposal this seat has not voted on, and tags the optional reason.
+async fn vote(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    need_confirm(&b)?;
+    let id = prop_id(&b)?;
+    let Some(ap) = b["approve"].as_bool() else { return Err(e(StatusCode::BAD_REQUEST, "approve (true/false) fehlt")) };
+    let (open, todo, _) = info(&st, id)?;
+    if !open { return Err(e(StatusCode::CONFLICT, "Vorschlag ist nicht mehr offen")) }
+    if !todo { return Err(e(StatusCode::CONFLICT, "Du hast hier schon abgestimmt")) }
+    let r = call(&st, if ap { "approve" } else { "decline" }, compose::vote_args(id, &note(&b)?, &s.user)).await?;
+    let _ = st.nudge.lock().unwrap().send(());
+    Ok(Json(json!({"ok":true,"state":r.get("state"),"approvals":r.get("approvals"),"threshold":r.get("threshold")})))
+}
+
+async fn withdraw(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    need_confirm(&b)?;
+    let id = prop_id(&b)?;
+    let (open, _, mine) = info(&st, id)?;
+    if !open { return Err(e(StatusCode::CONFLICT, "Vorschlag ist nicht mehr offen")) }
+    if !mine { return Err(e(StatusCode::FORBIDDEN, "Nur eigene Vorschläge können zurückgezogen werden")) }
+    let r = call(&st, "withdraw", compose::vote_args(id, &note(&b)?, &s.user)).await?;
+    let _ = st.nudge.lock().unwrap().send(());
+    Ok(Json(json!({"ok":true,"state":r.get("state")})))
+}
+
+fn make_plan(b: &Value) -> Result<compose::Plan, E> {
+    let kind = compose::Kind::from_id(b["kind"].as_str().unwrap_or("")).ok_or_else(|| e(StatusCode::BAD_REQUEST, "unbekannter Vorschlagstyp"))?;
+    compose::plan(kind, b["a"].as_str().unwrap_or(""), b["b"].as_str().unwrap_or("")).map_err(|m| E(StatusCode::BAD_REQUEST, m))
+}
+
+/// Exactly what a proposal would send, without sending it.
+async fn propose_preview(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    guard(&st, &h, true)?;
+    let p = make_plan(&b)?;
+    Ok(Json(json!({"tool":p.tool,"args":p.args,"preview":p.preview})))
+}
+
+async fn propose(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    guard(&st, &h, true)?;
+    need_confirm(&b)?;
+    let p = make_plan(&b)?;
+    let r = call(&st, p.tool, p.args).await?;
+    let _ = st.nudge.lock().unwrap().send(());
+    Ok(Json(json!({"ok":true,"id":r.get("id"),"channel":r.get("channel")})))
+}
+
+/// A topic exists once someone posts to it: name + first (tagged) message.
+async fn topic(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    let name = compose::topic_name(b["name"].as_str().unwrap_or("")).map_err(|m| E(StatusCode::BAD_REQUEST, m))?;
+    let body = clean(b["body"].as_str().unwrap_or("")).trim_end().to_string();
+    if body.trim().is_empty() { return Err(e(StatusCode::BAD_REQUEST, "Erste Nachricht fehlt")) }
+    if body.chars().count() > 16000 { return Err(e(StatusCode::BAD_REQUEST, "Nachricht zu lang")) }
+    call(&st, "chat_send", json!({"body": tag_body(&body, &s.user), "channel": {"kind":"topic","name":name}})).await?;
+    let _ = st.nudge.lock().unwrap().send(());
+    Ok(Json(json!({"ok":true,"key":format!("t:{name}")})))
 }
 
 fn key_chan(k: &str) -> Value {
@@ -311,6 +393,8 @@ fn poller(st: Arc<Shared>, m: Mcp, rx: mpsc::Receiver<()>) {
             Ok(f) => {
                 *st.files.write().unwrap() = f.files;
                 *st.images.write().unwrap() = f.images;
+                *st.pinfo.write().unwrap() = f.pinfo;
+                *st.seat.write().unwrap() = f.state["seat"].as_str().unwrap_or("").to_string();
                 *st.msg_ids.write().unwrap() = f.state["msgs"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str().map(str::to_string)).collect();
                 *st.persistent.write().unwrap() = f.state["msgs"].as_array().into_iter().flatten()
                     .filter(|x| x["file"]["upload"]["persistent"] == json!(true)).filter_map(|x| x["id"].as_str().map(str::to_string)).collect();
@@ -355,6 +439,12 @@ fn router(st: Arc<Shared>) -> Router {
         .route("/api/send", post(send))
         .route("/api/mark_read", post(mark_read))
         .route("/api/upload", post(upload))
+        .route("/api/proposal/{id}", get(proposal))
+        .route("/api/vote", post(vote))
+        .route("/api/withdraw", post(withdraw))
+        .route("/api/propose", post(propose))
+        .route("/api/propose/preview", post(propose_preview))
+        .route("/api/topic", post(topic))
         .route("/api/file/{id}", get(file))
         .route("/api/member-image/{name}", get(member_image))
         .layer(DefaultBodyLimit::max(128 * 1024))
@@ -378,7 +468,7 @@ pub fn serve(mut cfg: Config, ready: Option<mpsc::Sender<SocketAddr>>) -> Result
     let (tx, _rx) = watch::channel(Arc::new(json!({"loading":true}).to_string()));
     let (sdtx, _sdrx) = watch::channel(false);
     let st = Arc::new(Shared { cfg: cfg.clone(), sessions: Sessions::default(), limiter: Limiter::default(), shutdown: sdtx, kdf: Semaphore::new(2), uploads: Semaphore::new(2), persistent: Default::default(), worker: Arc::new(worker), tx,
-        files: Default::default(), images: Default::default(), msg_ids: Default::default(), nudge: Mutex::new(ntx), dl: Default::default() });
+        files: Default::default(), images: Default::default(), msg_ids: Default::default(), pinfo: Default::default(), seat: Default::default(), nudge: Mutex::new(ntx), dl: Default::default() });
     let st2 = st.clone();
     std::thread::spawn(move || poller(st2, poll, nrx));
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build().map_err(|e| e.to_string())?;

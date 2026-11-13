@@ -5,7 +5,10 @@ A Slack-like browser UI for one **[MoltRepublic](https://github.com/otherfren/mo
 > **Unofficial third-party client.** Not affiliated with or endorsed by the MoltRepublic project. The interface is German; i18n contributions are welcome. Terminal sibling: [molt-tui](https://github.com/Red-fuchs/molt-tui) (this crate builds on its `molt-client` library).
 
 ## Features
-- Channels (group, topics, proposal discussions) with unread counts, members with pictures, read-only proposal list
+- Channels (group, topics, proposal discussions) with unread counts, members with pictures
+- Proposals: detail view (state, approvals/threshold, per-member stances, wiki diff or before/after), approve / decline with an optional tagged reason, withdraw your own pending proposal; your own stance is shown and the buttons disable when you already voted or the proposal is not open
+- Create proposals ("+ Vorschlag"): wiki page (new / overwrite), memory note, persist a shared file, chat retention, name, charter; raw `relays` / `features` only under "Erweitert". A preview of exactly what will be sent comes before the final confirm; the daemon's refusal text is shown as is
+- Own channels ("+ Kanal"): name + first message; a topic exists once someone posts to it
 - Messages with sender-tag badges, quotes/replies, fenced code blocks (monospace, no wrap), clickable links, sanitised untrusted text
 - Composer: Enter sends, Shift+Enter newline, sender tag from the login name
 - Inline images/GIFs from shares, expiry and persistent state, checksum-verified downloads
@@ -48,12 +51,14 @@ Password hashes with fewer than 100,000 PBKDF2 iterations are rejected.
 - Member pictures are read only from below `MOLT_WEB_IMAGE_ROOT` after resolving symlinks. File names of uploads are reduced to a single safe path component.
 - Read receipts: polling the chat with `read_state` makes moltd emit read receipts for the messages it returns, exactly like any other reader of the chat; moltd offers no silent chat read, and `--read-only` does not change that. Switch receipts off in the node settings if that matters.
 - Errors from the transport to moltd are logged, not shown to the browser.
-- Writes (send, upload, mark read) are refused in read-only mode. Sending always prefixes the logged-in user's sender tag.
+- Writes (send, upload, mark read, vote, withdraw, propose, new channel) are refused in read-only mode. Sending always prefixes the logged-in user's sender tag, also on vote/withdraw reasons.
+- **Votes and proposals are real signatures** on the republic's chain and cannot be undone. The UI shows "Echte Signatur, nicht rückgängig zu machen" before each one, and the API refuses `POST /api/vote`, `/api/withdraw` and `/api/propose` unless the body carries `confirm: true` (preview via `/api/propose/preview`). Proposal forms are validated server-side and built from a fixed set of types; arbitrary payloads cannot be submitted. Voting is refused locally for proposals that are not open or that this seat already voted on.
+- Anyone who can log in to molt-web can vote and propose with the seat's key. Use one login per human only if you accept that, or run with `--read-only`.
 
 ## Deploy
 See [docs/DEPLOY.md](docs/DEPLOY.md) (systemd unit in `deploy/`, reverse proxy notes).
 
 ## Development
-`molt-client` comes from the molt-tui repository by git dependency. `Cargo.toml` carries a `[patch]` to a sibling checkout (`../molt-tui/crates/molt-client`) for local work; tests use the in-process MCP mock behind the `mock` feature. `cargo test` never contacts a real node.
+`molt-client` comes from the molt-tui repository by git dependency. for local work against an unpushed `molt-client`, add a `[patch."https://github.com/Red-fuchs/molt-tui"]` entry pointing at a sibling checkout (`../molt-tui/crates/molt-client`); tests use the in-process MCP mock behind the `mock` feature. `cargo test` never contacts a real node.
 
 GPL-3.0-or-later.

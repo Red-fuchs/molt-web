@@ -153,16 +153,139 @@ function renderMsgs() {
   }
   if (near || S.stick) list.scrollTop = list.scrollHeight; else list.scrollTop = keep;
 }
+// ---- modal dialogs (votes, proposals, channels): signed actions always go through a confirm step ----
+function closeModal() { $('#modal').classList.add('hidden'); $('#mbox').replaceChildren(); }
+function modal(title, kids, buttons) {
+  const box = $('#mbox'); box.replaceChildren(H('h3', {}, title), ...kids, H('div', { class: 'mbtn' }, ...buttons));
+  $('#modal').classList.remove('hidden');
+  const f = box.querySelector('input,textarea,select'); if (f) f.focus();
+}
+const btn = (t, f, cls) => H('button', { type: 'button', class: cls || '', onclick: f }, t);
+const cancelBtn = () => btn('Abbrechen', closeModal);
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && !$('#modal').classList.contains('hidden')) closeModal(); });
+$('#modal').addEventListener('mousedown', ev => { if (ev.target === $('#modal')) closeModal(); });
+const WARN = 'Echte Signatur, nicht rückgängig zu machen.';
+
+function topicDialog() {
+  const n = H('input', { maxlength: 64, placeholder: 'Name des Kanals (max. 64 Zeichen)' });
+  const b = H('textarea', { rows: 3, placeholder: 'Erste Nachricht (legt den Kanal an)' });
+  const err = H('p', { class: 'err' });
+  const go = async () => {
+    try { const r = await api('/api/topic', { name: n.value, body: b.value }); closeModal(); if (!S.extra.includes(r.key.slice(2))) S.extra.push(r.key.slice(2)); S.cur = r.key; S.view = 'chat'; S.stick = true; render(); toast('Kanal angelegt'); }
+    catch (e) { err.textContent = e.message; }
+  };
+  modal('Neuer Kanal', [H('p', { class: 'hint' }, 'Ein Kanal entsteht mit der ersten Nachricht. Sie geht an alle Mitglieder (nur als Ablage, kein privater Raum).'), n, b, err], [cancelBtn(), btn('Anlegen und senden', go, 'pri')]);
+}
+
+function voteDialog(p, approve) {
+  const note = H('textarea', { rows: 3, placeholder: 'Begründung (optional, erscheint im Vorschlagskanal)' });
+  const err = H('p', { class: 'err' });
+  const go = async () => {
+    try { await api('/api/vote', { id: p.id, approve, note: note.value, confirm: true }); closeModal(); delete S.det[p.id]; toast(approve ? 'Zustimmung gesendet' : 'Ablehnung gesendet'); }
+    catch (e) { err.textContent = e.message; }
+  };
+  modal(`#${p.id}: ${approve ? 'Zustimmen' : 'Ablehnen'}`, [H('p', { class: 'warn' }, WARN), H('p', {}, `${p.op}${p.summary ? ' ' + p.summary : ''} von ${p.by}`), note, err],
+    [cancelBtn(), btn(approve ? 'Verbindlich zustimmen' : 'Verbindlich ablehnen', go, approve ? 'pri' : 'dng')]);
+}
+
+function withdrawDialog(p) {
+  const note = H('textarea', { rows: 2, placeholder: 'Grund (optional)' });
+  const err = H('p', { class: 'err' });
+  const go = async () => {
+    try { await api('/api/withdraw', { id: p.id, note: note.value, confirm: true }); closeModal(); delete S.det[p.id]; toast('Vorschlag zurückgezogen'); }
+    catch (e) { err.textContent = e.message; }
+  };
+  modal(`#${p.id} zurückziehen`, [H('p', { class: 'warn' }, 'Zieht deinen offenen Vorschlag für alle zurück. Nicht rückgängig zu machen.'), note, err], [cancelBtn(), btn('Zurückziehen', go, 'dng')]);
+}
+
+function proposeDialog() {
+  const kinds = S.me.kinds || [];
+  const sel = H('select', {});
+  const grp = (l, f) => { const g = H('optgroup', { label: l }); for (const k of kinds.filter(f)) g.append(H('option', { value: k.id }, k.label)); if (g.children.length) sel.append(g); };
+  grp('Vorschlag', k => !k.advanced); grp('Erweitert', k => k.advanced);
+  const fields = H('div', { class: 'fields' }), err = H('p', { class: 'err' });
+  let a, b;
+  const files = () => (S.s.msgs || []).filter(m => m.file && m.file.upload && !m.file.upload.persistent);
+  const build = () => {
+    const k = kinds.find(x => x.id === sel.value); fields.replaceChildren(); err.textContent = '';
+    a = b = null;
+    if (k.id === 'persist') {
+      a = H('select', {}, ...files().map(m => H('option', { value: m.id }, `${m.file.name} (${fmtSize(m.file.size)}, von ${m.from})`)));
+      if (!a.children.length) fields.append(H('p', { class: 'hint' }, 'Keine temporäre Datei im Chat.'));
+      fields.append(H('label', {}, 'Datei', a));
+    } else if (k.a) { a = H('input', { maxlength: 1000 }); fields.append(H('label', {}, k.a, a)); }
+    if (k.b) { b = H('textarea', { rows: 10 }); fields.append(H('label', {}, k.b, b)); }
+    if (k.advanced) fields.prepend(H('p', { class: 'warn' }, 'Erweitert: wirkt auf die ganze Republik (Netzwerk bzw. Charta-Funktionen). Nur mit Bedacht.'));
+  };
+  sel.addEventListener('change', build); build();
+  const data = () => ({ kind: sel.value, a: a ? a.value : '', b: b ? b.value : '' });
+  const next = async () => {
+    try {
+      const r = await api('/api/propose/preview', data());
+      const send = async () => {
+        try { const j = await api('/api/propose', { ...data(), confirm: true }); closeModal(); toast('Vorschlag eingereicht' + (j.id ? ` (#${j.id})` : '')); }
+        catch (e) { err2.textContent = e.message; }
+      };
+      const err2 = H('p', { class: 'err' });
+      modal('Vorschau: das wird gesendet', [H('p', { class: 'warn' }, 'Vorschlag einreichen = signierte Aktion. ' + WARN + ' (Zurückziehen geht nur, solange er offen ist.)'),
+        H('pre', { class: 'pv' }, r.preview), H('details', {}, H('summary', {}, 'Technisch (MCP-Aufruf)'), H('pre', { class: 'pv' }, r.tool + ' ' + JSON.stringify(r.args, null, 1))), err2],
+        [btn('Zurück', proposeDialog), btn('Verbindlich einreichen', send, 'pri')]);
+    } catch (e) { err.textContent = e.message; }
+  };
+  modal('Vorschlag erstellen', [H('label', {}, 'Typ', sel), fields, err], [cancelBtn(), btn('Vorschau', next, 'pri')]);
+}
+
+// ---- proposals ----
+S.det = {}; S.open = new Set();
+const propKey = p => `${p.state}|${p.approvals}|${JSON.stringify(p.votes)}`;
+async function loadDetail(p) {
+  const k = propKey(p);
+  if (S.det[p.id] && S.det[p.id].k === k) return;
+  S.det[p.id] = { k, d: S.det[p.id]?.d, loading: true };
+  try { const d = await api('/api/proposal/' + p.id); S.det[p.id] = { k, d }; } catch (e) { S.det[p.id] = { k, err: e.message }; }
+  if (S.view === 'props') renderProps();
+}
+const VOTE_DE = { approved: 'zugestimmt', declined: 'abgelehnt', open: 'offen' };
+function diffView(text) {
+  const pre = H('pre', { class: 'diff' });
+  for (const l of text.split('\n')) pre.append(H('span', { class: l.startsWith('+') && !l.startsWith('+++') ? 'add' : l.startsWith('-') && !l.startsWith('---') ? 'del' : l.startsWith('@@') ? 'hunk' : '' }, l + '\n'));
+  return pre;
+}
+function detailView(p) {
+  const e = S.det[p.id], box = H('div', { class: 'pdet' });
+  if (!e || (e.loading && !e.d)) return H('div', { class: 'pdet votes' }, e && e.err ? 'Fehler: ' + e.err : 'lädt …');
+  if (e.err) return H('div', { class: 'pdet votes' }, 'Fehler: ' + e.err);
+  const d = e.d;
+  box.append(H('div', { class: 'votes' }, `Art: ${d.surface} / ${d.op}${d.paths.length ? ' · Seiten: ' + d.paths.join(', ') : ''}${d.superseded ? ' · Basis geändert (' + d.superseded + ')' : ''}`));
+  const me = S.s.seat;
+  box.append(H('ul', { class: 'stances' }, ...d.votes.map(([m, v]) => H('li', { class: 'v-' + v }, `${m}${m === me ? ' (du)' : ''}: ${VOTE_DE[v] || v}`))));
+  if (d.value) box.append(d.op === 'wiki_patch' ? diffView(d.value) : H('pre', { class: 'diff' }, d.value));
+  else if (d.proposed || d.current) { if (d.current) box.append(H('div', { class: 'votes' }, 'Vorher:'), H('pre', { class: 'diff' }, d.current)); if (d.proposed) box.append(H('div', { class: 'votes' }, 'Nachher:'), H('pre', { class: 'diff' }, d.proposed)); }
+  return box;
+}
 function renderProps() {
   const box = $('#props'); box.replaceChildren();
+  const head = H('div', { class: 'phead' }, H('h2', {}, 'Vorschläge'));
+  if (!S.me.read_only) head.append(btn('+ Vorschlag', proposeDialog, 'pri'));
+  box.append(head);
   if (!S.s.props.length) box.append(H('p', { class: 'day' }, 'Keine Vorschläge'));
   for (const p of S.s.props) {
-    const v = p.votes.map(([m, x]) => `${m}: ${x}`).join(', ');
+    const open = S.open.has(p.id), ro = S.me.read_only;
+    const mine = (p.votes.find(v => v[0] === S.s.seat) || [])[1];
+    const acts = H('div', { class: 'pact' },
+      btn(open ? 'Details ▾' : 'Details ▸', () => { if (open) S.open.delete(p.id); else { S.open.add(p.id); loadDetail(p); } renderProps(); }, 'link'),
+      H('a', { onclick: () => { S.cur = p.chan; S.view = 'chat'; render(); } }, 'Diskussion öffnen'));
+    if (!ro && p.state === 'proposed') {
+      acts.append(btn('Zustimmen', () => voteDialog(p, true), 'pri'), btn('Ablehnen', () => voteDialog(p, false), 'dng'));
+      acts.lastChild.disabled = acts.lastChild.previousSibling.disabled = !p.todo;
+      if (!p.todo) acts.lastChild.title = acts.lastChild.previousSibling.title = 'Du hast hier schon abgestimmt';
+      if (p.can_withdraw) acts.append(btn('Zurückziehen', () => withdrawDialog(p)));
+    }
     box.append(H('div', { class: 'prop' },
       H('h4', {}, `#${p.id} ${p.op}${p.summary ? ' ' + p.summary : ''}`, H('span', { class: 'st ' + p.state }, p.state)),
-      H('div', { class: 'votes' }, `von ${p.by} · ${p.approvals}/${p.threshold} Zustimmungen${p.todo ? ' · deine Stimme fehlt' : ''}`),
-      v ? H('div', { class: 'votes' }, v) : null,
-      H('a', { onclick: () => { S.cur = p.chan; S.view = 'chat'; render(); } }, 'Diskussion öffnen')));
+      H('div', { class: 'votes' }, `von ${p.by} · ${p.approvals}/${p.threshold} Zustimmungen · deine Stimme: ${mine ? (VOTE_DE[mine] || mine) : '–'}`),
+      acts, open ? detailView(p) : null));
+    if (open) loadDetail(p);
   }
 }
 function render() {
@@ -246,11 +369,7 @@ async function send() {
 }
 $('#composer').addEventListener('submit', ev => { ev.preventDefault(); send(); });
 $('#input').addEventListener('keydown', ev => { if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && ev.keyCode !== 229) { ev.preventDefault(); send(); } });
-$('#newtopic').addEventListener('submit', ev => {
-  ev.preventDefault(); const n = $('#ntname').value.trim().slice(0, 64); if (!n) return;
-  if (!S.extra.includes(n) && !S.s.chans.some(c => c.key === 't:' + n)) S.extra.push(n);
-  S.cur = 't:' + n; S.view = 'chat'; $('#ntname').value = ''; render(); $('#input').focus();
-});
+$('#newtopic').addEventListener('click', () => { if (!S.me.read_only) topicDialog(); else toast('Nur-Lesen-Modus', true); });
 async function markRead() { try { await api('/api/mark_read', { channel: chanObj(S.cur) }); } catch (e) { toast('Fehler: ' + e.message, true); } }
 $('#markread').addEventListener('click', markRead);
 $('#menu').addEventListener('click', () => $('#side').classList.toggle('open'));
