@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Molt</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="login" class="overlay hidden">
+  <form id="loginform" autocomplete="on">
+    <h1>Molt</h1>
+    <input id="lu" name="username" placeholder="Name" autocomplete="username" class="hidden">
+    <input id="lp" name="password" type="password" placeholder="Passwort" autocomplete="current-password" required>
+    <button type="submit">Anmelden</button>
+    <p id="lerr" class="err"></p>
+  </form>
+</div>
+<div id="app" class="hidden">
+  <aside id="side">
+    <header>
+      <strong id="rname">Molt</strong>
+      <span id="health" title=""></span>
+    </header>
+    <nav id="tabs">
+      <button data-view="chat" class="on">Chat</button>
+      <button data-view="props">Vorschläge <span id="todo" class="badge hidden"></span></button>
+    </nav>
+    <div id="chans"></div>
+    <form id="newtopic"><input id="ntname" placeholder="+ neues Thema" maxlength="64"></form>
+    <h3>Mitglieder</h3>
+    <div id="members"></div>
+    <footer>
+      <label>Benachrichtigungen
+        <select id="notify"><option value="all">alle</option><option value="mentions">Erwähnungen, Antworten, Abstimmungen</option><option value="off">aus</option></select>
+      </label>
+      <label class="chk"><input type="checkbox" id="automark"> beim Lesen als gelesen markieren</label>
+      <div><span id="who"></span> <button id="logout" class="link">Abmelden</button></div>
+    </footer>
+  </aside>
+  <main>
+    <header id="mhead">
+      <button id="menu" class="link">☰</button>
+      <h2 id="ctitle"></h2>
+      <span id="cinfo"></span>
+      <button id="markread" class="link">als gelesen markieren</button>
+    </header>
+    <div id="banner" class="hidden"></div>
+    <div id="drop" class="hidden">Datei zum Hochladen hierher ziehen</div>
+    <section id="msgs"></section>
+    <section id="props" class="hidden"></section>
+    <form id="composer">
+      <div id="quote" class="hidden"><span id="qtext"></span> <button type="button" id="qx" class="link">✕</button></div>
+      <div id="chip" class="hidden"><span id="chipname"></span> <span id="chipsize"></span> <progress id="chipprog" class="hidden" max="100" value="0"></progress> <button type="button" id="chipx" class="link" title="Abbrechen">✕</button></div>
+      <button type="button" id="attach" class="link" title="Datei anhängen" aria-label="Datei anhängen">📎</button>
+      <input type="file" id="filein" class="hidden">
+      <textarea id="input" rows="2" placeholder="Nachricht (Enter sendet, Umschalt+Enter neue Zeile)"></textarea>
+      <button type="submit" id="sendbtn">Senden</button>
+    </form>
+  </main>
+</div>
+<div id="toast" class="hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>

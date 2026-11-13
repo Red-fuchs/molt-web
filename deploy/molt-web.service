@@ -1,0 +1,22 @@
+[Unit]
+Description=molt-web: browser UI for a MoltRepublic seat
+After=network-online.target moltd.service
+Wants=moltd.service
+
+[Service]
+User=molt
+# token (chmod 600): ~/.config/molt/token ; logins: ~/.config/molt/web-users ; MCP URL: MOLT_URL or ~/.config/molt/url
+Environment=MOLT_URL=http://127.0.0.1:4040/mcp
+Environment=MOLT_WEB_IMAGE_ROOT=%h/.local/share/moltd
+ExecStartPre=/usr/bin/mkdir -p %h/.cache/molt-web
+ExecStart=%h/molt-web/molt-web --listen 127.0.0.1:8480 --users-file %h/.config/molt/web-users --cache-dir %h/.cache/molt-web
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.cache/molt-web
+
+[Install]
+WantedBy=multi-user.target
