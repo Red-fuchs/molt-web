@@ -30,11 +30,6 @@ ureq = "2"
 [dev-dependencies]
 molt-client = { git = "https://github.com/Red-fuchs/molt-tui", features = ["mock"] }
 
-# Local development before the molt-tui repo carries the `mock` feature: build against the sibling checkout.
-# Remove this section once molt-client is published at the git URL above.
-[patch."https://github.com/Red-fuchs/molt-tui"]
-molt-client = { path = "../molt-tui/crates/molt-client" }
-
 [profile.release]
 opt-level = 2
 lto = "thin"
