@@ -104,4 +104,5 @@ button.rx{border:0;color:inherit;cursor:pointer;font:inherit;font-size:.85em}but
 .shead .cv{width:1em;flex:none}.shead .badge{margin-left:auto;text-transform:none;letter-spacing:0}
 .csec{border-bottom:1px solid var(--bd);padding:.2em 0}
 #sbfab{position:fixed;left:.6em;bottom:.6em;z-index:6}
+@media (max-width:720px){#sbfab{display:none}}
 @media (min-width:721px){#app.nosb #side{display:none}}

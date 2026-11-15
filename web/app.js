@@ -106,7 +106,7 @@ function secHead(id, label, col, badge, body) {
     H('span', { class: 'cv', 'aria-hidden': 'true' }, col ? '▸' : '▾'), label, badge ? H('span', { class: 'badge', title: badge + ' ungelesen' }, '+' + badge) : null);
 }
 function colAll() {
-  const ids = [...SEC_IDS, 'members'];
+  const ids = [...SEC_IDS.slice(1), 'members'];
   const all = ids.every(i => S.col[i]);
   S.col = {}; if (!all) for (const i of ids) S.col[i] = true;
   saveCol(); renderSide();
@@ -125,15 +125,16 @@ function renderSide() {
   const hl = s.health || {};
   $('#health').textContent = s.err ? '⚠' : (hl.missing_relays || hl.diverged) ? '●' : '';
   $('#health').title = s.err || `Relays: ${hl.relays}, fehlend: ${hl.missing_relays}`;
-  const box = $('#chans'); box.replaceChildren();
+  const box = $('#chans'), fs = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.sec;
+  box.replaceChildren();
   const groups = new Map();
   for (const c of chanEntries()) { if (S.view === 'props' && c.section < 2) continue; if (!groups.has(c.section)) groups.set(c.section, []); groups.get(c.section).push(c); }
   for (const [sec, list] of groups) {
-    const id = SEC_IDS[sec], col = !!S.col[id], un = list.reduce((a, c) => a + c.unread, 0);
+    const id = SEC_IDS[sec], col = sec !== 0 && !!S.col[id], un = list.reduce((a, c) => a + (c.key === S.cur ? 0 : c.unread), 0);
     const body = H('div', { id: 'sec-' + id, class: 'sbody' });
-    box.append(secHead(id, SECTIONS[sec], col, col ? un : 0, body), body);
+    if (sec === 0) box.append(body); else box.append(secHead(id, SECTIONS[sec], col, col ? un : 0, body), body);
     for (const c of list) {
-      if (col && c.key !== S.cur && !c.unread) continue;
+      if (col && c.key !== S.cur) continue;
       body.append(H('div', { class: 'ch' + (c.key === S.cur ? ' on' : ''), onclick: () => { S.cur = c.key; S.view = 'chat'; S.quote = null; render(); $('#side').classList.remove('open'); $('#input').focus(); } },
         H('span', { class: 'l' }, (c.section === 1 ? '# ' : '') + c.label), c.unread ? H('span', { class: 'badge' }, c.unread) : null));
     }
@@ -143,6 +144,7 @@ function renderSide() {
   msec.append(secHead('members', `Mitglieder (${s.members.length})`, mcol, 0, mem), mem);
   if (!mcol) for (const m of s.members) mem.append(H('div', { class: 'mem', title: m.desc || '' }, avatar(m.name), H('span', {}, m.name), H('span', { class: 'dot p' + m.presence }),
     !S.me.read_only && s.poke_enabled && m.name !== s.seat ? H('button', { type: 'button', class: 'poke link', title: 'Anstupsen', 'aria-label': m.name + ' anstupsen', onclick: () => poke(m.name) }, '👋') : null));
+  if (fs) { const b = document.querySelector(`.shead[data-sec="${fs}"]`); if (b && b !== document.activeElement) b.focus(); }
   const t = $('#todo'); t.textContent = s.todo; t.classList.toggle('hidden', !s.todo);
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === S.view));
   const un = s.chans.reduce((a, c) => a + c.unread, 0);
@@ -531,7 +533,7 @@ $('#markread').addEventListener('click', markRead);
 $('#menu').addEventListener('click', toggleSb);
 $('#sbfab').addEventListener('click', toggleSb);
 $('#colall').addEventListener('click', colAll);
-document.addEventListener('keydown', ev => { if (ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.code === 'KeyB') { ev.preventDefault(); toggleSb(); } });
+document.addEventListener('keydown', ev => { if (ev.altKey && !ev.ctrlKey && !ev.metaKey && ev.code === 'KeyB' && !/^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName) && !ev.target.isContentEditable) { ev.preventDefault(); toggleSb(); } });
 applySb();
 document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => { S.view = b.dataset.view; render(); }));
 
