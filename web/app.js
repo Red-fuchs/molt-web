@@ -111,7 +111,8 @@ function renderSide() {
       H('span', { class: 'l' }, (c.section === 1 ? '# ' : '') + c.label), c.unread ? H('span', { class: 'badge' }, c.unread) : null));
   }
   const mem = $('#members'); mem.replaceChildren();
-  for (const m of s.members) mem.append(H('div', { class: 'mem', title: m.desc || '' }, avatar(m.name), H('span', {}, m.name), H('span', { class: 'dot p' + m.presence })));
+  for (const m of s.members) mem.append(H('div', { class: 'mem', title: m.desc || '' }, avatar(m.name), H('span', {}, m.name), H('span', { class: 'dot p' + m.presence }),
+    !S.me.read_only && s.poke_enabled && m.name !== s.seat ? H('button', { type: 'button', class: 'poke link', title: 'Anstupsen', 'aria-label': m.name + ' anstupsen', onclick: () => poke(m.name) }, '👋') : null));
   const t = $('#todo'); t.textContent = s.todo; t.classList.toggle('hidden', !s.todo);
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === S.view));
   const un = s.chans.reduce((a, c) => a + c.unread, 0);
@@ -134,7 +135,7 @@ function renderMsgs() {
   for (const m of msgs) {
     const d = fmtDay(m.ts); if (d !== day) { day = d; list.append(H('div', { class: 'day' }, d)); }
     const q = m.quote && byId[m.quote];
-    const el = H('div', { class: 'm' + (m.kind === 'system' ? ' sys' : ''), id: 'm-' + m.id },
+    const el = H('div', { class: 'm' + (m.kind === 'system' ? ' sys' : '') + ((m.mentions || []).includes(s.seat) ? ' me-mention' : ''), id: 'm-' + m.id },
       avatar(m.from),
       H('div', { class: 'b' },
         H('div', { class: 'hd' }, H('span', { class: 'nm' }, m.from), m.tag ? H('span', { class: 'tag' }, m.tag) : null, H('span', { class: 'ts' }, fmtTime(m.ts)),
@@ -373,12 +374,70 @@ $('#input').addEventListener('paste', ev => { const f = [...(ev.clipboardData?.f
   main.addEventListener('drop', ev => { if (!hasFiles(ev)) return; ev.preventDefault(); depth = 0; $('#drop').classList.add('hidden'); attach(ev.dataTransfer.files[0]); });
 }
 $('#qx').addEventListener('click', () => { S.quote = null; updateQuote(); });
+// ---- @mentions: dropdown under the textarea (mirrors molt-client::mention; the server extracts the real mentions) ----
+const fold = t => t.toLowerCase().replace(/ä/g, 'a').replace(/ö/g, 'o').replace(/ü/g, 'u').replace(/ß/g, 's');
+function tokenAt(text, cur) {
+  for (let i = cur - 1; i >= 0; i--) {
+    const c = text[i];
+    if (c === '@') {
+      if (i > 0 && /[\p{L}\p{N}_]/u.test(text[i - 1])) return null;
+      let q = text.slice(i + 1, cur); const br = q.startsWith('{');
+      if (br && q.includes('}')) return null;
+      if (!br && /\s/.test(q)) return null;
+      return { start: i, end: cur, q: br ? q.slice(1) : q };
+    }
+    if (c === '\n' || c === '}') return null;
+  }
+  return null;
+}
+function mentionMatches(q) {
+  const p = fold(q), me = fold(S.s?.seat || '');
+  return (S.s?.members || []).filter(m => fold(m.name) !== me).map(m => ({ m, r: fold(m.name).startsWith(p) ? 0 : fold(m.name).includes(p) ? 1 : 9 }))
+    .filter(x => x.r < 9).sort((a, b) => a.r - b.r || (b.m.presence > 0) - (a.m.presence > 0) || fold(a.m.name).localeCompare(fold(b.m.name))).slice(0, 8).map(x => x.m);
+}
+const MN = { items: [], sel: 0, tok: null, off: null };
+function mentionClose() { MN.items = []; MN.tok = null; const l = $('#mentions'); l.classList.add('hidden'); l.replaceChildren(); const ta = $('#input'); ta.setAttribute('aria-expanded', 'false'); ta.removeAttribute('aria-activedescendant'); }
+function mentionRender() {
+  const l = $('#mentions'), ta = $('#input'); l.replaceChildren();
+  MN.items.forEach((m, i) => l.append(H('li', { role: 'option', id: 'mn' + i, 'aria-selected': i === MN.sel ? 'true' : 'false',
+    onmousedown: ev => { ev.preventDefault(); MN.sel = i; mentionAccept(); } }, H('span', { class: 'dot p' + m.presence }), H('span', {}, m.name))));
+  l.classList.remove('hidden'); ta.setAttribute('aria-expanded', 'true'); ta.setAttribute('aria-activedescendant', 'mn' + MN.sel);
+}
+function mentionUpdate() {
+  const ta = $('#input'), t = tokenAt(ta.value, ta.selectionStart);
+  if (!t) { MN.off = null; return mentionClose(); }
+  if (MN.off === t.start) return mentionClose();
+  MN.items = mentionMatches(t.q); MN.tok = t; MN.sel = Math.min(MN.sel, Math.max(0, MN.items.length - 1));
+  if (MN.items.length) mentionRender(); else mentionClose();
+}
+function mentionAccept() {
+  const ta = $('#input'), t = MN.tok, m = MN.items[MN.sel]; if (!t || !m) return;
+  const after = ta.value.slice(t.end), ins = '@{' + m.name + '}' + (/^\s/.test(after) ? '' : ' ');
+  ta.value = ta.value.slice(0, t.start) + ins + after; const pos = t.start + ins.length;
+  ta.setSelectionRange(pos, pos); MN.off = null; mentionClose(); ta.focus();
+}
+$('#input').addEventListener('keydown', ev => {
+  if (!MN.items.length) return;
+  if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); MN.sel = (MN.sel + (ev.key === 'ArrowDown' ? 1 : MN.items.length - 1)) % MN.items.length; mentionRender(); }
+  else if (ev.key === 'Enter' || ev.key === 'Tab') { if (ev.isComposing) return; ev.preventDefault(); ev.stopImmediatePropagation(); mentionAccept(); }
+  else if (ev.key === 'Escape') { ev.preventDefault(); MN.off = MN.tok?.start ?? null; mentionClose(); }
+});
+$('#input').addEventListener('input', mentionUpdate);
+$('#input').addEventListener('click', mentionUpdate);
+$('#input').addEventListener('blur', () => setTimeout(mentionClose, 120));
+function pokeToast(r) {
+  const m = { sent: `${r.member} angestupst`, rate_limited: `${r.member}: Stups erst in ${r.secs}s`, disabled: `${r.member}: Stupsen ist aus`, offline: `${r.member} ist offline, kein Stups`, failed: `${r.member}: Stups fehlgeschlagen` };
+  return m[r.result] || r.member;
+}
+async function poke(name) { try { const r = await api('/api/poke', { member: name }); toast(pokeToast(r), r.result !== 'sent'); } catch (e) { toast('Anstupsen fehlgeschlagen: ' + e.message, true); } }
+
 async function send() {
   const ta = $('#input'), body = ta.value;
   if (S.att) return upload();
   if (!body.trim() || S.sending) return;
   S.sending = true; $('#sendbtn').disabled = true;
-  try { await api('/api/send', { channel: chanObj(S.cur), body, quote: S.quote || undefined }); ta.value = ''; S.quote = null; S.stick = true; }
+  try { const r = await api('/api/send', { channel: chanObj(S.cur), body, quote: S.quote || undefined }); ta.value = ''; S.quote = null; S.stick = true; mentionClose();
+    const n = (r.pokes || []).map(pokeToast); if (r.skipped) n.push(`${r.skipped} weitere Erwähnung(en) ohne Stups`); if (n.length) toast(n.join('; '), (r.pokes || []).some(x => x.result !== 'sent')); }
   catch (e) { toast('Senden fehlgeschlagen: ' + e.message, true); }
   S.sending = false; $('#sendbtn').disabled = false; ta.focus();
 }
@@ -395,8 +454,9 @@ const mode = () => store.get('molt.notify', 'mentions');
 function relevant(m, s) {
   const mode_ = mode(); if (mode_ === 'off' || m.from === s.seat || m.kind === 'system') return false;
   if (mode_ === 'all') return true;
-  const me = S.me.tag.toLowerCase(), b = m.body.toLowerCase();
-  if (b.includes('@' + me) || b.includes('@' + s.seat.toLowerCase())) return true;
+  if ((m.mentions || []).includes(s.seat)) return true;
+  const tag = S.me.tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // web user's own tag, word-boundary like the server
+  if (new RegExp('(^|[^\\p{L}\\p{N}_])@' + tag + '(?![\\p{L}\\p{N}_-])', 'iu').test(m.body)) return true;
   const q = m.quote && s.msgs.find(x => x.id === m.quote);
   return !!(q && q.tag === S.me.tag);
 }

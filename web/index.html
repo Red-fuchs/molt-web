@@ -55,8 +55,9 @@
       <div id="chip" class="hidden"><span id="chipname"></span> <span id="chipsize"></span> <progress id="chipprog" class="hidden" max="100" value="0"></progress> <button type="button" id="chipx" class="link" title="Abbrechen">✕</button></div>
       <button type="button" id="attach" class="link" title="Datei anhängen" aria-label="Datei anhängen">📎</button>
       <input type="file" id="filein" class="hidden">
-      <textarea id="input" rows="2" placeholder="Nachricht (Enter sendet, Umschalt+Enter neue Zeile)"></textarea>
+      <textarea id="input" rows="2" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="mentions" placeholder="Nachricht (Enter sendet, Umschalt+Enter neue Zeile, @ erwähnt)"></textarea>
       <button type="submit" id="sendbtn">Senden</button>
+      <ul id="mentions" role="listbox" aria-label="Mitglieder" class="hidden"></ul>
     </form>
   </main>
 </div>

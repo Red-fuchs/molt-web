@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 /// Per-proposal facts the write endpoints check before calling the daemon: (open, still to vote, own and pending).
 pub type PropInfo = (bool, bool, bool);
-pub struct Fetched { pub pinfo: HashMap<u64, PropInfo>, pub state: Value, pub files: HashMap<String, FileMeta>, pub images: HashMap<String, String> }
+pub struct Fetched { pub pinfo: HashMap<u64, PropInfo>, pub state: Value, pub files: HashMap<String, FileMeta>, pub images: HashMap<String, String>, pub roster: Vec<Member> }
 
 pub fn ckey(c: &Chan) -> String {
     match c { Chan::Group => "g".into(), Chan::Topic(n) => format!("t:{n}"), Chan::Patch(i) => format!("p:{i}") }
@@ -51,7 +51,7 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
         for m in v.into_iter().skip(skip) {
             let (tag, body) = split_tag(&m.body);
             let mut j = json!({"id":m.id,"from":m.from,"ts":m.ts,"kind":m.kind,"chan":ckey(&m.chan),"tag":tag,"body":cap(body),
-                "quote":m.quote,"reactions":m.reactions});
+                "quote":m.quote,"reactions":m.reactions,"mentions":molt_client::mention::extract(body, &mem)});
             if let Some(f) = &m.file {
                 let u = ups.iter().find(|u| u.id == m.id);
                 j["file"] = json!({"name":f.name,"kind":f.kind,"size":f.size,"image":f.kind.eq_ignore_ascii_case("image") && is_image_name(&f.name),
@@ -80,7 +80,7 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
     let state = json!({"name":status.name,"seat":status.member,"retention_days":st.get("chat_retention_days"),
         "health":{"relays":status.relays,"missing_relays":status.missing_relays,"diverged":status.diverged,"lag":status.lag,"active_1h":status.active_1h},
         "wiki_rev":wiki_rev,"chans":chans_j,"msgs":out,"props":props_j,"members":mem_j,"todo":todo});
-    Fetched { pinfo, state, files, images }
+    Fetched { pinfo, state, files, images, roster: mem }
 }
 
 const MAX_DETAIL: usize = 60_000;
@@ -102,6 +102,7 @@ pub fn fetch(m: &Mcp) -> Result<Fetched, String> {
     let members = m.call("read_members", json!({}))?;
     let uploads = m.call("read_uploads", json!({}))?;
     let mut f = build(&st, &chat, &props, &acts, &members, &uploads);
+    f.state["poke_enabled"] = json!(molt_client::poke::poke_enabled(m));
     f.state["name"] = json!(one(f.state["name"].as_str().unwrap_or("")));
     Ok(f)
 }

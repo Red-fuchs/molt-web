@@ -33,6 +33,7 @@ struct Shared {
     files: RwLock<HashMap<String, FileMeta>>, images: RwLock<HashMap<String, String>>,
     msg_ids: RwLock<HashSet<String>>, pinfo: RwLock<HashMap<u64, snap::PropInfo>>, seat: RwLock<String>,
     nudge: Mutex<mpsc::Sender<()>>, dl: tokio::sync::Mutex<()>,
+    roster: RwLock<Vec<molt_client::model::Member>>, poke_on: RwLock<bool>, gates: Mutex<HashMap<String, molt_client::poke::PokeGate>>,
 }
 type S = State<Arc<Shared>>;
 
@@ -204,8 +205,51 @@ async fn send(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<V
         a["quote"] = json!(q);
     }
     call(&st, "chat_send", a).await?;
+    // chat is out; pokes are best effort and never change the outcome (max 2 per message, 1/min per target and user)
+    let (pokes, skipped) = poke_run(&st, &s.user, &body).await;
     let _ = st.nudge.lock().unwrap().send(());
-    Ok(Json(json!({"ok":true})))
+    Ok(Json(json!({"ok":true,"pokes":pokes,"skipped":skipped})))
+}
+
+fn poke_json(r: &molt_client::poke::PokeResult) -> Value {
+    use molt_client::poke::PokeResult::*;
+    match r {
+        Sent => json!({"result":"sent"}), Disabled => json!({"result":"disabled"}), Offline => json!({"result":"offline"}),
+        RateLimited(s) => json!({"result":"rate_limited","secs":s}),
+        Failed(x) => json!({"result":"failed","error":public_err(x)}),
+    }
+}
+fn unix_now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
+
+async fn poke_run(st: &Arc<Shared>, user: &str, body: &str) -> (Vec<Value>, usize) {
+    let (st2, user, body) = (st.clone(), user.to_string(), body.to_string());
+    tokio::task::spawn_blocking(move || {
+        let roster = st2.roster.read().unwrap().clone();
+        let (me, on) = (st2.seat.read().unwrap().clone(), *st2.poke_on.read().unwrap());
+        let mut gates = st2.gates.lock().unwrap();
+        let gate = gates.entry(user).or_default();
+        let (res, skipped) = molt_client::poke::poke_mentions(&st2.worker, gate, &roster, &me, on, false, &body, unix_now());
+        (res.iter().map(|(n, r)| { let mut j = poke_json(r); j["member"] = json!(n); j }).collect(), skipped)
+    }).await.unwrap_or_default()
+}
+
+/// Explicit "anstupsen" (member list / proposal): one member, same gate and checks as mentions.
+async fn poke(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    let name = b["member"].as_str().unwrap_or("").to_string();
+    let (st2, user) = (st.clone(), s.user.clone());
+    let r = tokio::task::spawn_blocking(move || {
+        let roster = st2.roster.read().unwrap().clone();
+        if !roster.iter().any(|m| m.name == name) { return Err(e(StatusCode::BAD_REQUEST, "unbekanntes Mitglied")) }
+        let me = st2.seat.read().unwrap().clone();
+        if name == me { return Err(e(StatusCode::BAD_REQUEST, "du kannst dich nicht selbst anstupsen")) }
+        let on = *st2.poke_on.read().unwrap();
+        let mut gates = st2.gates.lock().unwrap();
+        let r = molt_client::poke::poke_one(&st2.worker, gates.entry(user).or_default(), &roster, on, &name, unix_now());
+        let mut j = poke_json(&r); j["member"] = json!(name);
+        Ok(j)
+    }).await.map_err(|_| e(StatusCode::INTERNAL_SERVER_ERROR, "intern"))??;
+    Ok(Json(r))
 }
 
 fn need_confirm(b: &Value) -> Result<(), E> {
@@ -414,6 +458,8 @@ fn poller(st: Arc<Shared>, m: Mcp, rx: mpsc::Receiver<()>) {
             Ok(f) => {
                 *st.files.write().unwrap() = f.files;
                 *st.images.write().unwrap() = f.images;
+                *st.roster.write().unwrap() = f.roster;
+                *st.poke_on.write().unwrap() = f.state["poke_enabled"] == json!(true);
                 *st.pinfo.write().unwrap() = f.pinfo;
                 *st.seat.write().unwrap() = f.state["seat"].as_str().unwrap_or("").to_string();
                 *st.msg_ids.write().unwrap() = f.state["msgs"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str().map(str::to_string)).collect();
@@ -458,6 +504,7 @@ fn router(st: Arc<Shared>) -> Router {
         .route("/api/me", get(me))
         .route("/api/events", get(events))
         .route("/api/send", post(send))
+        .route("/api/poke", post(poke))
         .route("/api/mark_read", post(mark_read))
         .route("/api/upload", post(upload))
         .route("/api/proposal/{id}", get(proposal))
@@ -489,7 +536,7 @@ pub fn serve(mut cfg: Config, ready: Option<mpsc::Sender<SocketAddr>>) -> Result
     let (tx, _rx) = watch::channel(Arc::new(json!({"loading":true}).to_string()));
     let (sdtx, _sdrx) = watch::channel(false);
     let st = Arc::new(Shared { cfg: cfg.clone(), sessions: Sessions::default(), limiter: Limiter::default(), shutdown: sdtx, kdf: Semaphore::new(2), uploads: Semaphore::new(2), persistent: Default::default(), worker: Arc::new(worker), tx,
-        files: Default::default(), images: Default::default(), msg_ids: Default::default(), pinfo: Default::default(), seat: Default::default(), nudge: Mutex::new(ntx), dl: Default::default() });
+        files: Default::default(), images: Default::default(), msg_ids: Default::default(), pinfo: Default::default(), seat: Default::default(), nudge: Mutex::new(ntx), dl: Default::default(), roster: Default::default(), poke_on: Default::default(), gates: Default::default() });
     let st2 = st.clone();
     std::thread::spawn(move || poller(st2, poll, nrx));
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build().map_err(|e| e.to_string())?;

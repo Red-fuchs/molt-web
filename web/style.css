@@ -81,3 +81,8 @@ pre.pv{white-space:pre-wrap;overflow-wrap:anywhere}
 .pact{display:flex;gap:.6em;align-items:center;flex-wrap:wrap;margin-top:.4em}.pdet{margin-top:.5em}
 .stances{margin:.3em 0;padding-left:1.2em}.stances .v-approved{color:#2a9d4a}.stances .v-declined{color:var(--err)}
 #newtopic{display:block;margin:.4em .8em}
+#mentions{flex:1 0 100%;order:9;list-style:none;margin:0;padding:.2em;max-height:12em;overflow:auto;background:var(--bg);border:1px solid var(--bd);border-radius:6px}
+#mentions li{display:flex;gap:.5em;align-items:center;padding:.25em .6em;border-radius:4px;cursor:pointer}
+#mentions li[aria-selected=true]{background:var(--acc);color:var(--accfg)}
+.mem button.poke{margin-left:auto;padding:0 .4em;font-size:.85em}
+.m.me-mention{border-left:3px solid var(--acc);background:var(--sel)}

@@ -209,3 +209,43 @@ fn proposals_page_past_100_and_version() {
     let j: Value = serde_json::from_str(&r.into_string().unwrap()).unwrap();
     assert!(j["version"].as_str().is_some_and(|v| v.starts_with("0.1.0-")), "{j}");
 }
+
+#[test]
+fn mentions_poke_after_send_with_gate() {
+    let e = boot(false);
+    let s = login(&e);
+    let st = state(&e, &s, |v| v["poke_enabled"] == json!(true));
+    // state carries the extracted mentions (word boundary, no substring hit)
+    assert!(st["msgs"].as_array().unwrap().iter().all(|m| m["mentions"].is_array()));
+    let (c, j) = post(&e, &s, "/api/send", json!({"body":"@bob @{bob} hallo @seat-a @carol @bobby"}));
+    assert_eq!(c, 200, "{j}");
+    let r = j["pokes"].as_array().unwrap();
+    assert_eq!(r.iter().map(|p| (p["member"].as_str().unwrap(), p["result"].as_str().unwrap())).collect::<Vec<_>>(), [("bob", "sent"), ("carol", "sent")]);
+    assert_eq!(j["skipped"], 0);
+    let order: Vec<String> = e.mock.calls.lock().unwrap().iter().map(|c| c.0.clone()).filter(|n| n == "chat_send" || n == "poke").collect();
+    assert_eq!(order, ["chat_send", "poke", "poke"]);
+    assert_eq!(e.mock.called("poke").iter().map(|a| a["member"].clone()).collect::<Vec<_>>(), [json!("bob"), json!("carol")]);
+    // second message inside the minute: chat goes out, poke is rate limited locally
+    let (c, j) = post(&e, &s, "/api/send", json!({"body":"nochmal @bob"}));
+    assert_eq!(c, 200);
+    assert_eq!(j["pokes"][0]["result"], "rate_limited");
+    assert_eq!(e.mock.called("poke").len(), 2);
+    assert_eq!(e.mock.called("chat_send").len(), 2);
+    // explicit poke: same gate; unknown member and self refused
+    assert_eq!(post(&e, &s, "/api/poke", json!({"member":"carol"})).1["result"], "rate_limited");
+    assert_eq!(post(&e, &s, "/api/poke", json!({"member":"nobody"})).0, 400);
+    assert_eq!(post(&e, &s, "/api/poke", json!({"member":"seat-a"})).0, 400);
+    // own seat is never poked
+    let (_, j) = post(&e, &s, "/api/send", json!({"body":"@bob @carol @seat-a"}));
+    assert_eq!(j["skipped"], 0);
+}
+
+#[test]
+fn read_only_refuses_pokes() {
+    let e = boot(true);
+    let s = login(&e);
+    state(&e, &s, |_| true);
+    assert_eq!(post(&e, &s, "/api/poke", json!({"member":"bob"})).0, 403);
+    assert_eq!(post(&e, &s, "/api/send", json!({"body":"@bob"})).0, 403);
+    assert!(e.mock.called("poke").is_empty() && e.mock.called("chat_send").is_empty());
+}
