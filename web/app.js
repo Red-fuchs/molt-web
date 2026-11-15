@@ -88,6 +88,10 @@ function renderFile(m) {
     if (u.availability) info.push(u.availability + (u.online ? '' : ', Absender offline'));
   }
   box.append(dl && !f.image ? H('a', { href: `/api/file/${m.id}?dl=1`, target: '_blank', rel: 'noopener' }, info.join(' · ')) : info.join(' · '));
+  if (u?.vote?.mine_open && !S.me.read_only) {
+    const pv = { id: u.vote.proposal, op: u.vote.op || 'Datei', summary: f.name, by: m.from };
+    box.append(' ', H('span', { class: 'upvote' }, H('button', { type: 'button', class: 'pri', onclick: () => voteDialog(pv, true) }, `#${pv.id} zustimmen`), ' ', H('button', { type: 'button', onclick: () => voteDialog(pv, false) }, 'ablehnen')));
+  }
   return box;
 }
 
@@ -161,7 +165,7 @@ function renderMsgs() {
   $('#tclose').classList.toggle('hidden', !isT || !!ent.closed); $('#treopen').classList.toggle('hidden', !isT || !ent.closed); $('#tforget').classList.toggle('hidden', !isT);
   const msgs = s.msgs.filter(m => m.chan === S.cur);
   const byId = Object.fromEntries(s.msgs.map(m => [m.id, m]));
-  const key = S.cur + '|' + Object.keys(S.pend).join() + '|' + JSON.stringify(msgs.map(m => [m.id, m.body, m.deleted, m.tag, m.reactions, m.reacted, m.file?.upload?.local, m.file?.upload?.persistent, m.file?.upload?.available]));
+  const key = S.cur + '|' + Object.keys(S.pend).join() + '|' + JSON.stringify(msgs.map(m => [m.id, m.body, m.deleted, m.tag, m.reactions, m.reacted, m.file?.upload?.local, m.file?.upload?.persistent, m.file?.upload?.available, m.file?.upload?.vote]));
   const sel = window.getSelection && window.getSelection();
   // keep a text selection / open picker alive: skip the redraw, the next poll retries
   if (key !== lastKey && ((sel && !sel.isCollapsed && list.contains(sel.anchorNode)) || list.querySelector('.picker'))) return;
@@ -377,14 +381,54 @@ function render() {
   if (!S.s || S.s.loading) return;
   if (!chanEntries().some(c => c.key === S.cur)) S.cur = 'g';
   renderSide(); pokeCheck();
-  const props = S.view === 'props';
-  $('#msgs').classList.toggle('hidden', props); $('#props').classList.toggle('hidden', !props); $('#composer').classList.toggle('hidden', props || S.me.read_only);
-  $('#mhead').classList.toggle('hidden', props);
-  if (props) renderProps(); else renderMsgs();
+  const props = S.view === 'props', diag = S.view === 'diag', other = props || diag;
+  $('#msgs').classList.toggle('hidden', other); $('#props').classList.toggle('hidden', !props); $('#diag').classList.toggle('hidden', !diag); $('#composer').classList.toggle('hidden', other || S.me.read_only);
+  $('#mhead').classList.toggle('hidden', other);
+  if (diag) { if (!$('#diag').firstChild) diagGo(D.tab); } else if (props) renderProps(); else renderMsgs();
   const b = $('#banner'); b.classList.toggle('hidden', !S.s.err && !S.me.read_only);
   b.textContent = S.s.err ? 'moltd nicht erreichbar: ' + S.s.err : 'Nur-Lesen-Modus: Senden ist deaktiviert';
   b.style.background = S.s.err ? '' : 'var(--mut)';
   updateQuote();
+}
+
+// ---- diagnostics ----
+const D = { tab: 'chain', text: '', err: '', busy: false, q: '' };
+const DTABS = [['chain', 'Kette'], ['mirror', 'Spiegel'], ['wake', 'Wecken'], ['notice', 'Hinweise'], ['upload', 'Upload prüfen']];
+async function diagLoad(path, key) {
+  D.busy = true; D.err = ''; renderDiag();
+  try { const j = await api(path); D.text = key === 'lines' ? j.lines.join('\n') || '(keine Treffer)' : j.text; } catch (e) { D.err = e.message; D.text = ''; }
+  D.busy = false; renderDiag();
+}
+const diagTabs = () => [...DTABS, ...(S.me.admin ? [['log', 'Protokoll']] : [])];
+function diagGo(tab) {
+  D.tab = tab; D.text = ''; D.err = '';
+  if (tab === 'chain') diagLoad('/api/diag/chain'); else if (tab === 'mirror') diagLoad('/api/diag/mirror'); else if (tab === 'wake') diagLoad('/api/diag/wake_skill');
+  else if (tab === 'log') diagLoad('/api/diag/log?q=' + encodeURIComponent(D.q), 'lines'); else renderDiag();
+}
+function diagAct(title, text, path, body, ok) {
+  const err = H('p', { class: 'err' });
+  const go = async () => { try { const j = await api(path, { ...body, confirm: true }); closeModal(); if (j.text) { D.text = j.text; renderDiag(); } toast(ok); } catch (e) { err.textContent = e.message; } };
+  modal(title, [H('p', { class: 'warn' }, text), err], [cancelBtn(), btn('Ausführen', go, 'pri')]);
+}
+function renderDiag() {
+  const box = $('#diag'); box.replaceChildren();
+  const bar = H('div', { class: 'dtabs' }, ...diagTabs().map(([k, l]) => H('button', { type: 'button', class: k === D.tab ? 'on' : '', onclick: () => diagGo(k) }, l)));
+  const acts = [];
+  if (D.tab === 'log') {
+    const q = H('input', { placeholder: 'ID oder Stichwort (leer: Vorschläge und Ablehnungen)', value: D.q, maxlength: 64 });
+    q.addEventListener('keydown', ev => { if (ev.key === 'Enter') { D.q = q.value; diagGo('log'); } });
+    acts.push(q, btn('Suchen', () => { D.q = q.value; diagGo('log'); }), H('p', { class: 'hint' }, 'Enthält IP-Adressen anderer Knoten, nur für Administratoren.'));
+  }
+  if (D.tab === 'wake' && S.me.admin && !S.me.read_only) acts.push(btn('Weckbefehl testen', () => diagAct('Weckbefehl testen', 'Führt den Weckbefehl des Knotens auf dem Server aus.', '/api/diag/test_wake', {}, 'Weckbefehl ausgeführt')));
+  if (D.tab === 'notice') {
+    const id = H('input', { placeholder: 'Hinweis-ID (leer: alle)', maxlength: 128 });
+    acts.push(H('p', { class: 'hint' }, 'Quittiert Hinweise am gemeinsamen Sitz, für alle Oberflächen.'), id, !S.me.read_only && btn('Quittieren', () => diagAct('Hinweise quittieren', id.value ? 'Hinweis ' + id.value + ' quittieren?' : 'ALLE Hinweise quittieren?', '/api/diag/clear_notice', id.value ? { id: id.value } : {}, 'Quittiert')));
+  }
+  if (D.tab === 'upload') {
+    const id = H('input', { placeholder: 'Upload-ID (32 Zeichen hex)', maxlength: 32 });
+    acts.push(id, btn('Prüfen', () => diagLoad('/api/diag/upload/' + encodeURIComponent(id.value.trim()))));
+  }
+  box.append(bar, ...(acts.length ? [H('div', { class: 'dacts' }, ...acts)] : []), D.err ? H('p', { class: 'err' }, D.err) : null, D.busy ? H('p', { class: 'hint' }, 'lädt …') : null, H('pre', { class: 'dout' }, D.text));
 }
 
 // ---- composer ----

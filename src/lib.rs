@@ -106,8 +106,11 @@ fn guard(st: &Shared, h: &HeaderMap, write: bool) -> Result<auth::Session, E> {
     Ok(s)
 }
 
+fn is_admin(st: &Shared, s: &auth::Session) -> bool { st.cfg.admins.contains(&s.user.to_lowercase()) }
+fn admin(st: &Shared, s: &auth::Session) -> Result<(), E> { if is_admin(st, s) { Ok(()) } else { Err(e(StatusCode::FORBIDDEN, "Nur für Administratoren (MOLT_WEB_ADMINS)")) } }
+
 fn me_json(st: &Shared, s: &auth::Session) -> Value {
-    json!({"user":s.user,"tag":s.user,"csrf":s.csrf,"read_only":st.cfg.read_only,"downloads":st.cfg.downloads,"max_upload":st.cfg.max_upload,"version":env!("MOLT_WEB_VERSION"),
+    json!({"user":s.user,"tag":s.user,"csrf":s.csrf,"read_only":st.cfg.read_only,"downloads":st.cfg.downloads,"max_upload":st.cfg.max_upload,"version":env!("MOLT_WEB_VERSION"),"admin":is_admin(st,s),
         "kinds":compose::ALL.iter().map(|k| { let (a, b) = k.fields(); json!({"id":k.id(),"label":k.label(),"a":a,"b":b,"advanced":k.advanced()}) }).collect::<Vec<_>>()})
 }
 
@@ -495,6 +498,58 @@ async fn mark_read(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<J
     Ok(Json(json!({"ok":true})))
 }
 
+// ---- diagnostics: read_log (admin, peer IPs), chain, mirror, wake, notices, upload resolve ----
+async fn diag_log(State(st): S, h: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, false)?;
+    admin(&st, &s)?;
+    let q = q.get("q").map_or("", String::as_str).chars().take(64).collect::<String>();
+    let v = call(&st, "read_log", json!({})).await?;
+    audit(&s.user, "read_log", &q);
+    Ok(Json(json!({"lines":molt_client::diag::filter_log(&molt_client::diag::log_lines(&v), &q)})))
+}
+
+/// chain/mirror/wake_skill: text view; IPs are masked unless the user is an admin.
+async fn diag_text(st: &Shared, h: &HeaderMap, tool: &'static str, max: usize) -> Result<Json<Value>, E> {
+    let s = guard(st, h, false)?;
+    let t = molt_client::diag::pretty(&call(st, tool, json!({})).await?, max);
+    let t = if is_admin(st, &s) { t } else { t.lines().map(molt_client::diag::mask_ips).collect::<Vec<_>>().join("\n") };
+    Ok(Json(json!({"text":t})))
+}
+async fn diag_chain(State(st): S, h: HeaderMap) -> Result<Json<Value>, E> { diag_text(&st, &h, "read_chain", 20_000).await }
+async fn diag_mirror(State(st): S, h: HeaderMap) -> Result<Json<Value>, E> { diag_text(&st, &h, "read_mirror", 20_000).await }
+async fn diag_wake_skill(State(st): S, h: HeaderMap) -> Result<Json<Value>, E> { diag_text(&st, &h, "wake_skill", 20_000).await }
+
+/// Runs the node's wake command on the host: admin only.
+async fn diag_test_wake(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    admin(&st, &s)?;
+    need_confirm(&b)?;
+    let v = call(&st, "test_wake", json!({})).await?;
+    audit(&s.user, "test_wake", "-");
+    Ok(Json(json!({"ok":true,"text":molt_client::diag::pretty(&v, 4000)})))
+}
+
+/// Acknowledges notices of the shared seat (visible to every member/UI): `id` = one notice, absent = all.
+async fn diag_clear_notice(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    need_confirm(&b)?;
+    let id = match b.get("id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(i)) if !i.is_empty() && i.chars().count() <= 128 && molt_client::text::clean(i) == *i => Some(i.clone()),
+        _ => return Err(e(StatusCode::BAD_REQUEST, "ungültige Hinweis-ID")),
+    };
+    call(&st, "clear_notice", id.as_ref().map_or(json!({}), |i| json!({"id":i}))).await?;
+    audit(&s.user, "clear_notice", id.as_deref().unwrap_or("all"));
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn diag_upload(State(st): S, h: HeaderMap, Path(id): Path<String>) -> Result<Json<Value>, E> {
+    guard(&st, &h, false)?;
+    if !molt_client::diag::valid_checksum(&id) { return Err(e(StatusCode::BAD_REQUEST, "ungültige Prüfsumme")) }
+    let v = call(&st, "resolve_upload", json!({"checksum":id})).await?;
+    Ok(Json(json!({"text":molt_client::diag::pretty(&v, 4000)})))
+}
+
 fn blob(ct: &'static str, b: Vec<u8>, name: Option<&str>) -> Response {
     let mut r = ([(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "private, max-age=300")], b).into_response();
     if let Some(n) = name {
@@ -604,6 +659,13 @@ fn router(st: Arc<Shared>) -> Router {
         .route("/api/propose", post(propose))
         .route("/api/propose/preview", post(propose_preview))
         .route("/api/topic", post(topic))
+        .route("/api/diag/log", get(diag_log))
+        .route("/api/diag/chain", get(diag_chain))
+        .route("/api/diag/mirror", get(diag_mirror))
+        .route("/api/diag/wake_skill", get(diag_wake_skill))
+        .route("/api/diag/test_wake", post(diag_test_wake))
+        .route("/api/diag/clear_notice", post(diag_clear_notice))
+        .route("/api/diag/upload/{id}", get(diag_upload))
         .route("/api/file/{id}", get(file))
         .route("/api/member-image/{name}", get(member_image))
         .layer(DefaultBodyLimit::max(128 * 1024))

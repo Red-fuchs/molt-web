@@ -14,6 +14,8 @@ pub struct Config {
     /// member pictures are served only from below this directory (moltd's data dir); None = never
     pub image_root: Option<PathBuf>,
     pub dl_timeout: Duration,
+    /// login names (lowercase) allowed to see the node log (peer IPs) and run test_wake
+    pub admins: Vec<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -28,7 +30,7 @@ impl Default for Config {
     fn default() -> Self {
         Config { url: None, token: None, listen: "127.0.0.1:8480".into(), users: vec![], read_only: false, downloads: true,
             cache: PathBuf::from("molt-web-cache"), poll_ms: 2500, secure: false, max_file: 50 << 20, max_upload: 50 << 20,
-            trusted_proxy: false, image_root: None, dl_timeout: Duration::from_secs(60) }
+            trusted_proxy: false, image_root: None, dl_timeout: Duration::from_secs(60), admins: vec![] }
     }
 }
 
@@ -50,6 +52,7 @@ Config (in this order): flags, env, files
   MOLT_WEB_SECURE=1 / --secure-cookie Secure + __Host- session cookie (use behind https)
   MOLT_WEB_TRUSTED_PROXY=1 / --trusted-proxy   read the client IP from X-Forwarded-For (rightmost) for login limits
   MOLT_WEB_IMAGE_ROOT / --image-root  directory member pictures may be read from (moltd's data dir); unset = no member pictures
+  MOLT_WEB_ADMINS=name,...            login names that may read the node log (contains peer IPs) and run test_wake; default none
   MOLT_WEB_POLL_MS (default 2500), MOLT_WEB_MAX_FILE bytes (download, default 50 MB), MOLT_WEB_MAX_UPLOAD bytes (default 50 MB)";
 
 fn flag(a: &[String], k: &str) -> Option<String> { a.iter().position(|x| x == k).and_then(|i| a.get(i + 1).cloned()) }
@@ -62,6 +65,8 @@ pub const MIN_ITERS: u32 = 100_000;
 
 /// Sender tag of a single-user setup: MOLT_ID, else the neutral `web`.
 pub fn default_tag() -> String { env("MOLT_ID").unwrap_or_else(|| "web".into()) }
+
+pub fn parse_admins(s: &str) -> Vec<String> { s.split(',').map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect() }
 
 pub fn hash_iters(h: &str) -> Option<u32> { h.split('$').nth(1)?.parse().ok() }
 
@@ -104,6 +109,7 @@ impl Config {
             trusted_proxy: has(a, "--trusted-proxy") || env("MOLT_WEB_TRUSTED_PROXY").is_some_and(|v| truthy(&v)),
             image_root: flag(a, "--image-root").or_else(|| env("MOLT_WEB_IMAGE_ROOT")).map(PathBuf::from),
             dl_timeout: d.dl_timeout,
+            admins: parse_admins(&env("MOLT_WEB_ADMINS").unwrap_or_default()),
         })
     }
 }
@@ -116,6 +122,8 @@ mod t {
         let u = parse_users("# c\nalice:pbkdf2-sha256$600000$aa$bb\n\nbad line\nb[x]:h\n bob : pbkdf2-sha256$100000$a$b \nweak:pbkdf2-sha256$1000$a$b\n");
         assert_eq!(u, vec![("alice".into(), "pbkdf2-sha256$600000$aa$bb".into()), ("bob".into(), "pbkdf2-sha256$100000$a$b".into())]);
     }
+    #[test]
+    fn admins() { assert_eq!(parse_admins(" Alice, ,bob,"), ["alice", "bob"]); assert!(parse_admins("").is_empty()); }
     #[test]
     fn debug_has_no_secrets() {
         let c = Config { token: Some("TOPSECRET".into()), users: vec![("a".into(), "HASHVALUE".into())], ..Config::default() };

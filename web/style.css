@@ -106,3 +106,8 @@ button.rx{border:0;color:inherit;cursor:pointer;font:inherit;font-size:.85em}but
 #sbfab{position:fixed;left:.6em;bottom:.6em;z-index:6}
 @media (max-width:720px){#sbfab{display:none}}
 @media (min-width:721px){#app.nosb #side{display:none}}
+
+#diag{flex:1;overflow:auto;padding:1em}.dtabs{display:flex;gap:.3em;flex-wrap:wrap;margin-bottom:.6em}.dtabs .on{outline:1px solid var(--mut)}
+.dacts{display:flex;gap:.4em;flex-wrap:wrap;align-items:center;margin-bottom:.6em}.dacts input{flex:1;min-width:12em}.dacts .hint{flex-basis:100%}
+.dout{white-space:pre-wrap;word-break:break-word;background:var(--bg2);border:1px solid var(--bd);border-radius:6px;padding:.6em;font-size:.85em;max-height:70vh;overflow:auto}
+.upvote{margin-left:.5em}

@@ -59,7 +59,7 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
             if let Some(f) = &m.file {
                 let u = ups.iter().find(|u| u.id == m.id);
                 j["file"] = json!({"name":f.name,"kind":f.kind,"size":f.size,"image":f.kind.eq_ignore_ascii_case("image") && is_image_name(&f.name),
-                    "upload": u.map(|u| json!({"expires_ts":u.expires_ts,"persistent":u.persistent,"availability":u.availability,"local":u.local,"online":u.online,"available":u.available}))});
+                    "upload": u.map(|u| json!({"expires_ts":u.expires_ts,"persistent":u.persistent,"availability":u.availability,"local":u.local,"online":u.online,"available":u.available,"vote":u.vote.as_ref().map(|(op,id,mine)| json!({"op":op,"proposal":id,"mine_open":mine}))}))});
                 files.insert(m.id.clone(), f.clone());
             }
             out.push(j);
