@@ -198,7 +198,8 @@ function withdrawDialog(p) {
   modal(`#${p.id} zurückziehen`, [H('p', { class: 'warn' }, 'Zieht deinen offenen Vorschlag für alle zurück. Nicht rückgängig zu machen.'), note, err], [cancelBtn(), btn('Zurückziehen', go, 'dng')]);
 }
 
-function proposeDialog() {
+function proposeDialog(keep) {
+  if (keep !== true) proposeDialog.saved = null;
   const kinds = S.me.kinds || [];
   const sel = H('select', {});
   const grp = (l, f) => { const g = H('optgroup', { label: l }); for (const k of kinds.filter(f)) g.append(H('option', { value: k.id }, k.label)); if (g.children.length) sel.append(g); };
@@ -219,17 +220,31 @@ function proposeDialog() {
   };
   sel.addEventListener('change', build); build();
   const data = () => ({ kind: sel.value, a: a ? a.value : '', b: b ? b.value : '' });
+  const saved = proposeDialog.saved;
+  if (saved) { sel.value = saved.kind; build(); if (a) a.value = saved.a; if (b) b.value = saved.b; }
   const next = async () => {
+    proposeDialog.saved = data();
     try {
       const r = await api('/api/propose/preview', data());
-      const send = async () => {
-        try { const j = await api('/api/propose', { ...data(), confirm: true }); closeModal(); toast('Vorschlag eingereicht' + (j.id ? ` (#${j.id})` : '')); }
-        catch (e) { err2.textContent = e.message; }
-      };
+      const warns = r.warnings || [], acc = new Set();
       const err2 = H('p', { class: 'err' });
+      const sendBtn = btn('Verbindlich einreichen', async () => {
+        if (sendBtn.disabled) return;
+        sendBtn.disabled = true; err2.textContent = '';
+        try { const j = await api('/api/propose', { ...data(), confirm: true, accept_warnings: [...acc] }); proposeDialog.saved = null; closeModal(); toast('Vorschlag eingereicht' + (j.id ? ` (#${j.id})` : '')); }
+        catch (e) { err2.textContent = e.message; sendBtn.disabled = warns.some(w => !acc.has(w.code)); }
+      }, 'pri');
+      const sync = () => { sendBtn.disabled = warns.some(w => !acc.has(w.code)); };
+      const wbox = H('div', {});
+      for (const w of warns) {
+        const cb = H('input', { type: 'checkbox' });
+        cb.addEventListener('change', () => { cb.checked ? acc.add(w.code) : acc.delete(w.code); sync(); });
+        wbox.append(H('label', { class: 'warn' }, cb, ` ${w.code}: ${w.text} (zur Kenntnis genommen)`));
+      }
       modal('Vorschau: das wird gesendet', [H('p', { class: 'warn' }, 'Vorschlag einreichen = signierte Aktion. ' + WARN + ' (Zurückziehen geht nur, solange er offen ist.)'),
-        H('pre', { class: 'pv' }, r.preview), H('details', {}, H('summary', {}, 'Technisch (MCP-Aufruf)'), H('pre', { class: 'pv' }, r.tool + ' ' + JSON.stringify(r.args, null, 1))), err2],
-        [btn('Zurück', proposeDialog), btn('Verbindlich einreichen', send, 'pri')]);
+        wbox, H('pre', { class: 'pv' }, r.preview), H('details', {}, H('summary', {}, 'Technisch (MCP-Aufruf)'), H('pre', { class: 'pv' }, r.tool + ' ' + JSON.stringify(r.args, null, 1))), err2],
+        [btn('Zurück', () => proposeDialog(true)), sendBtn]);
+      sync();
     } catch (e) { err.textContent = e.message; }
   };
   modal('Vorschlag erstellen', [H('label', {}, 'Typ', sel), fields, err], [cancelBtn(), btn('Vorschau', next, 'pri')]);

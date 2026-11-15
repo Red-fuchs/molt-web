@@ -97,7 +97,7 @@ pub fn detail(p: &Prop, seat: &str) -> Value {
 pub fn fetch(m: &Mcp) -> Result<Fetched, String> {
     let st = m.call("status", json!({}))?;
     let chat = m.call("read_state", json!({"surface":"chat"}))?;
-    let props = m.call("list_proposals", json!({"state":"all"}))?;
+    let props = fetch_proposals(m)?;
     let acts = m.call("read_actions", json!({}))?;
     let members = m.call("read_members", json!({}))?;
     let uploads = m.call("read_uploads", json!({}))?;

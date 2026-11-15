@@ -10,8 +10,11 @@ const PW: &str = "correct horse";
 struct Env { mock: Mock, base: String }
 struct Sess { cookie: String, csrf: String }
 
-fn boot(read_only: bool) -> Env {
-    let (h, _) = Sim::new("seat-a").into_handler(None);
+fn boot(read_only: bool) -> Env { boot_with(read_only, 0) }
+fn boot_with(read_only: bool, filler: usize) -> Env {
+    let mut sim = Sim::new("seat-a");
+    sim.add_filler(filler);
+    let (h, _) = sim.into_handler(None);
     let m = mock::start(TOKEN, h);
     let cache = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("w{}", molt_web::auth::rand_hex(6)));
     let cfg = Config { url: Some(m.url.clone()), token: Some(TOKEN.into()), listen: "127.0.0.1:0".into(),
@@ -102,17 +105,18 @@ fn propose_preview_confirm_withdraw() {
     let (c, pv) = post(&e, &s, "/api/propose/preview", b.clone());
     assert_eq!(c, 200);
     assert!(pv["preview"].as_str().unwrap().contains("notizen/idee.md") && pv["tool"] == "wiki_edit");
-    assert!(e.mock.called("wiki_edit").is_empty(), "preview must not call the daemon");
+    assert_eq!(pv["warnings"], json!([]));
+    assert!(e.mock.called("wiki_edit").iter().all(|c| c["dry_run"] == true), "preview only dry-runs");
     assert_eq!(post(&e, &s, "/api/propose", b.clone()).0, 400, "confirm missing");
     for bad in [json!({"kind":"nope"}), json!({"kind":"wiki_new","a":"../x.md","b":"x"}), json!({"kind":"retention","a":"0"}), json!({"kind":"relays","a":"http://x"})] {
         assert_eq!(post(&e, &s, "/api/propose", { let mut b = bad; b["confirm"] = json!(true); b }).0, 400);
     }
-    assert!(e.mock.called("wiki_edit").is_empty() && e.mock.called("propose").is_empty());
+    assert!(e.mock.called("wiki_edit").iter().all(|c| c["dry_run"] == true) && e.mock.called("propose").is_empty());
     let mut ok = b.clone(); ok["confirm"] = json!(true);
     let (c, j) = post(&e, &s, "/api/propose", ok.clone());
     assert_eq!(c, 200, "{j}");
     let id = j["id"].as_u64().unwrap();
-    assert_eq!(e.mock.called("wiki_edit")[0], json!({"edits":[{"op":"create","path":"notizen/idee.md","content":"# Idee\ntext"}]}));
+    assert_eq!(e.mock.called("wiki_edit").last().unwrap(), &json!({"edits":[{"op":"create","path":"notizen/idee.md","content":"# Idee\ntext"}]}));
     // daemon refusal reason is shown verbatim
     let (c, j) = post(&e, &s, "/api/propose", ok);
     assert_eq!(c, 502);
@@ -166,4 +170,42 @@ fn read_only_refuses_everything() {
     }
     let names: Vec<String> = e.mock.calls.lock().unwrap().iter().map(|c| c.0.clone()).collect();
     for w in ["chat_send", "approve", "decline", "withdraw", "propose", "wiki_edit"] { assert!(!names.iter().any(|n| n == w), "{w} in read-only mode") }
+}
+
+#[test]
+fn foreign_rewrite_warning_flow() {
+    let e = boot(false);
+    let s = login(&e);
+    state(&e, &s, |_| true);
+    let b = json!({"kind":"wiki_edit","a":"home.md","b":"# Neu\ntext"});
+    let (c, pv) = post(&e, &s, "/api/propose/preview", b.clone());
+    assert_eq!(c, 200, "{pv}");
+    assert_eq!(pv["warnings"][0]["code"], "foreign_rewrite", "{pv}");
+    assert!(pv["args"]["edits"][0]["content"].as_str().unwrap().starts_with("---\ntype: meta"), "header kept");
+    let n = e.mock.called("wiki_edit").len();
+    let mut ok = b.clone(); ok["confirm"] = json!(true);
+    // unaccepted warning: refused, nothing proposed
+    let (c, j) = post(&e, &s, "/api/propose", ok.clone());
+    assert_eq!(c, 409, "{j}");
+    assert!(j["error"].as_str().unwrap().contains("foreign_rewrite"));
+    assert!(e.mock.called("wiki_edit").iter().all(|c| c["dry_run"] == true));
+    ok["accept_warnings"] = json!(["foreign_rewrite"]);
+    let (c, j) = post(&e, &s, "/api/propose", ok);
+    assert_eq!(c, 200, "{j}");
+    assert!(j["id"].as_u64().is_some());
+    let last = e.mock.called("wiki_edit").pop().unwrap();
+    assert_eq!(last["allow_warnings"], json!(["foreign_rewrite"]));
+    assert!(e.mock.called("wiki_edit").len() > n);
+}
+
+#[test]
+fn proposals_page_past_100_and_version() {
+    let e = boot_with(false, 620);
+    let s = login(&e);
+    let st = state(&e, &s, |v| v["props"].as_array().is_some_and(|p| p.len() > 100));
+    assert!(st["props"].as_array().unwrap().len() >= 620);
+    assert!(e.mock.called("list_proposals").iter().any(|c| c["cursor"].is_string() || c["cursor"].is_number()), "followed the cursor");
+    let r = ureq::get(&format!("{}/api/me", e.base)).set("Cookie", &s.cookie).call().unwrap();
+    let j: Value = serde_json::from_str(&r.into_string().unwrap()).unwrap();
+    assert!(j["version"].as_str().is_some_and(|v| v.starts_with("0.1.0-")), "{j}");
 }

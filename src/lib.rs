@@ -106,7 +106,7 @@ fn guard(st: &Shared, h: &HeaderMap, write: bool) -> Result<auth::Session, E> {
 }
 
 fn me_json(st: &Shared, s: &auth::Session) -> Value {
-    json!({"user":s.user,"tag":s.user,"csrf":s.csrf,"read_only":st.cfg.read_only,"downloads":st.cfg.downloads,"max_upload":st.cfg.max_upload,
+    json!({"user":s.user,"tag":s.user,"csrf":s.csrf,"read_only":st.cfg.read_only,"downloads":st.cfg.downloads,"max_upload":st.cfg.max_upload,"version":env!("MOLT_WEB_VERSION"),
         "kinds":compose::ALL.iter().map(|k| { let (a, b) = k.fields(); json!({"id":k.id(),"label":k.label(),"a":a,"b":b,"advanced":k.advanced()}) }).collect::<Vec<_>>()})
 }
 
@@ -184,7 +184,7 @@ fn chan_arg(v: &Value) -> Result<Option<Value>, E> {
 async fn call(st: &Shared, name: &'static str, args: Value) -> Result<Value, E> {
     let m = st.worker.clone();
     tokio::task::spawn_blocking(move || m.call(name, args)).await.map_err(|_| e(StatusCode::INTERNAL_SERVER_ERROR, "intern"))?
-        .map_err(|x| E(StatusCode::BAD_GATEWAY, public_err(&x)))
+        .map_err(call_err)
 }
 
 /// Transport/HTTP failures are logged but never shown to the browser (they name hosts and ports).
@@ -260,20 +260,41 @@ fn make_plan(b: &Value) -> Result<compose::Plan, E> {
     compose::plan(kind, b["a"].as_str().unwrap_or(""), b["b"].as_str().unwrap_or("")).map_err(|m| E(StatusCode::BAD_REQUEST, m))
 }
 
-/// Exactly what a proposal would send, without sending it.
+/// moltd calls that may run long: an unanswered write has an unknown outcome, never "unreachable".
+fn call_err(x: String) -> E {
+    if molt_client::mcp::is_unknown(&x) { E(StatusCode::GATEWAY_TIMEOUT, "Status unbekannt: moltd hat nicht rechtzeitig geantwortet. Bitte die Vorschlagsliste prüfen, bevor du es erneut versuchst.".into()) }
+    else { E(StatusCode::BAD_GATEWAY, public_err(&x)) }
+}
+
+async fn check_plan(st: &Shared, p: compose::Plan) -> Result<compose::Checked, E> {
+    let m = st.worker.clone();
+    tokio::task::spawn_blocking(move || compose::check(&m, p)).await.map_err(|_| e(StatusCode::INTERNAL_SERVER_ERROR, "intern"))?.map_err(call_err)
+}
+
+fn warnings_json(c: &compose::Checked) -> Value { json!(c.warnings.iter().map(|w| json!({"code":w.code,"text":w.text})).collect::<Vec<_>>()) }
+
+/// What a proposal would send (wiki edits: after a real moltd dry run, with its warnings), without proposing.
 async fn propose_preview(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
     guard(&st, &h, true)?;
-    let p = make_plan(&b)?;
-    Ok(Json(json!({"tool":p.tool,"args":p.args,"preview":p.preview})))
+    let c = check_plan(&st, make_plan(&b)?).await?;
+    Ok(Json(json!({"tool":c.plan.tool,"args":c.plan.args,"preview":c.plan.preview,"warnings":warnings_json(&c)})))
 }
 
 async fn propose(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
     guard(&st, &h, true)?;
     need_confirm(&b)?;
-    let p = make_plan(&b)?;
-    let r = call(&st, p.tool, p.args).await?;
+    let c = check_plan(&st, make_plan(&b)?).await?;
+    let acc: Vec<String> = b["accept_warnings"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
+    if let Some(w) = c.warnings.iter().find(|w| !acc.contains(&w.code)) {
+        return Err(E(StatusCode::CONFLICT, format!("Warnung nicht bestätigt: {} ({})", w.code, w.text)));
+    }
+    let acc: Vec<String> = c.warnings.iter().map(|w| w.code.clone()).collect();
+    let p = compose::confirm(&c, &acc);
+    let (tool, args) = (p.tool, p.args);
+    let m = st.worker.clone();
+    let r = tokio::task::spawn_blocking(move || m.call(tool, args)).await.map_err(|_| e(StatusCode::INTERNAL_SERVER_ERROR, "intern"))?.map_err(call_err)?;
     let _ = st.nudge.lock().unwrap().send(());
-    Ok(Json(json!({"ok":true,"id":r.get("id"),"channel":r.get("channel")})))
+    Ok(Json(json!({"ok":true,"id":compose::result_id(&r),"channel":r.get("channel")})))
 }
 
 /// A topic exists once someone posts to it: name + first (tagged) message.
