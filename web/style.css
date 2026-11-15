@@ -32,7 +32,7 @@ input,textarea,select{font:inherit;color:var(--fg);background:var(--bg);border:1
 #side footer select{width:100%}.chk{display:flex;gap:.4em;align-items:center}
 main{flex:1;min-width:0;display:flex;flex-direction:column}
 #mhead{display:flex;align-items:center;gap:.7em;padding:.6em 1em;border-bottom:1px solid var(--bd)}
-#mhead h2{margin:0;font-size:1.1em}#cinfo{color:var(--mut);font-size:.85em;flex:1}#menu{display:none}
+#mhead h2{margin:0;font-size:1.1em}#cinfo{color:var(--mut);font-size:.85em;flex:1}
 #banner{padding:.4em 1em;background:var(--err);color:#fff;font-size:.9em}
 #msgs,#props{flex:1;overflow:auto;padding:.5em 0}
 .day{text-align:center;color:var(--mut);font-size:.8em;margin:.8em 0 .3em}
@@ -98,3 +98,10 @@ button.rx{border:0;color:inherit;cursor:pointer;font:inherit;font-size:.85em}but
 #memsec summary{cursor:pointer;font-size:.75em;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);padding:.4em 1em}
 #members{max-height:12em;overflow:auto}
 #pokeline{padding:.3em 1em;font-size:.85em;color:var(--mut);background:var(--bg2);border-top:1px solid var(--bd)}#pokeline.bad{color:var(--err)}
+
+.shead{display:flex;align-items:center;gap:.4em;width:100%;border:0;border-radius:0;background:none;color:var(--mut);font-size:.75em;text-transform:uppercase;letter-spacing:.05em;padding:.5em 1em;text-align:left}
+.shead:hover,.shead:focus-visible{color:var(--fg);background:var(--bg3)}
+.shead .cv{width:1em;flex:none}.shead .badge{margin-left:auto;text-transform:none;letter-spacing:0}
+.csec{border-bottom:1px solid var(--bd);padding:.2em 0}
+#sbfab{position:fixed;left:.6em;bottom:.6em;z-index:6}
+@media (min-width:721px){#app.nosb #side{display:none}}

@@ -22,12 +22,13 @@
     <header>
       <strong id="rname">Molt</strong>
       <span id="health" title=""></span>
+      <button id="colall" class="link" type="button" title="Alle einklappen / ausklappen" aria-label="Alle Bereiche einklappen oder ausklappen">⇕</button>
     </header>
     <nav id="tabs">
       <button data-view="chat" class="on">Chat</button>
       <button data-view="props">Vorschläge <span id="todo" class="badge hidden"></span></button>
     </nav>
-    <details id="memsec" open><summary id="memsum">Mitglieder</summary><div id="members"></div></details>
+    <div id="memsec" class="csec"></div>
     <div id="chans"></div>
     <button id="newtopic" class="link" type="button">+ Kanal</button>
     <footer>
@@ -40,7 +41,7 @@
   </aside>
   <main>
     <header id="mhead">
-      <button id="menu" class="link">☰</button>
+      <button id="menu" class="link" type="button" title="Seitenleiste ein-/ausblenden (Alt+B)" aria-label="Seitenleiste ein- oder ausblenden" aria-controls="side" aria-expanded="true">☰</button>
       <h2 id="ctitle"></h2>
       <span id="cinfo"></span>
       <button id="markread" class="link">sichtbare als gelesen markieren</button>
@@ -65,6 +66,7 @@
   </main>
 </div>
 <div id="modal" class="overlay hidden" role="dialog" aria-modal="true"><div id="mbox"></div></div>
+<button id="sbfab" class="hidden" type="button" title="Seitenleiste einblenden (Alt+B)" aria-label="Seitenleiste einblenden" aria-controls="side">☰</button>
 <div id="toast" class="hidden"></div>
 <script src="/app.js"></script>
 </body>
