@@ -27,10 +27,9 @@
       <button data-view="chat" class="on">Chat</button>
       <button data-view="props">Vorschläge <span id="todo" class="badge hidden"></span></button>
     </nav>
+    <details id="memsec" open><summary id="memsum">Mitglieder</summary><div id="members"></div></details>
     <div id="chans"></div>
     <button id="newtopic" class="link" type="button">+ Kanal</button>
-    <h3>Mitglieder</h3>
-    <div id="members"></div>
     <footer>
       <label>Benachrichtigungen
         <select id="notify"><option value="all">alle</option><option value="mentions">Erwähnungen, Antworten, Abstimmungen</option><option value="off">aus</option></select>
@@ -53,6 +52,7 @@
     <div id="drop" class="hidden">Datei zum Hochladen hierher ziehen</div>
     <section id="msgs"></section>
     <section id="props" class="hidden"></section>
+    <div id="pokeline" class="hidden" role="status"></div>
     <form id="composer">
       <div id="quote" class="hidden"><span id="qtext"></span> <button type="button" id="qx" class="link">✕</button></div>
       <div id="chip" class="hidden"><span id="chipname"></span> <span id="chipsize"></span> <progress id="chipprog" class="hidden" max="100" value="0"></progress> <button type="button" id="chipx" class="link" title="Abbrechen">✕</button></div>

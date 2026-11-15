@@ -210,7 +210,9 @@ async fn send(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<V
     // chat is out; pokes are best effort and never change the outcome (max 2 per message, 1/min per target and user)
     let (pokes, skipped) = poke_run(&st, &s.user, &body).await;
     let _ = st.nudge.lock().unwrap().send(());
-    Ok(Json(json!({"ok":true,"pokes":pokes,"skipped":skipped})))
+    let ambiguous = { let r = st.roster.read().unwrap(); molt_client::mention::resolve(&body, &r).ambiguous };
+    let amb: Vec<Value> = ambiguous.iter().map(|(t, c)| json!({"token":t,"candidates":c})).collect();
+    Ok(Json(json!({"ok":true,"pokes":pokes,"skipped":skipped,"ambiguous":amb})))
 }
 
 fn poke_json(r: &molt_client::poke::PokeResult) -> Value {

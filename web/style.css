@@ -93,3 +93,8 @@ pre.pv{white-space:pre-wrap;overflow-wrap:anywhere}
 .picker button{font-size:1.1em}
 button.rx{border:0;color:inherit;cursor:pointer;font:inherit;font-size:.85em}button.rx.mine{outline:1px solid var(--mut)}
 .m .gone{color:var(--mut);font-style:italic}
+
+#memsec{border-bottom:1px solid var(--bd);padding:.3em 0}
+#memsec summary{cursor:pointer;font-size:.75em;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);padding:.4em 1em}
+#members{max-height:12em;overflow:auto}
+#pokeline{padding:.3em 1em;font-size:.85em;color:var(--mut);background:var(--bg2);border-top:1px solid var(--bd)}#pokeline.bad{color:var(--err)}

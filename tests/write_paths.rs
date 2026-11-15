@@ -241,6 +241,19 @@ fn mentions_poke_after_send_with_gate() {
 }
 
 #[test]
+fn short_mentions_resolve_unique() {
+    // mock roster: bob, carol, seat-a (ambiguity is unit-tested in molt-client)
+    let e = boot(false);
+    let s = login(&e);
+    state(&e, &s, |v| v["poke_enabled"] == json!(true));
+    let (c, j) = post(&e, &s, "/api/send", json!({"body":"@caro, hi @bo and a@bob.de @xyz"}));
+    assert_eq!(c, 200, "{j}");
+    let m: Vec<_> = j["pokes"].as_array().unwrap().iter().map(|p| p["member"].as_str().unwrap()).collect();
+    assert_eq!(m, ["carol", "bob"]);
+    assert_eq!(j["ambiguous"], json!([]));
+}
+
+#[test]
 fn read_only_refuses_pokes() {
     let e = boot(true);
     let s = login(&e);

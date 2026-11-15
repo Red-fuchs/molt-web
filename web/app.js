@@ -111,6 +111,7 @@ function renderSide() {
       H('span', { class: 'l' }, (c.section === 1 ? '# ' : '') + c.label), c.unread ? H('span', { class: 'badge' }, c.unread) : null));
   }
   const mem = $('#members'); mem.replaceChildren();
+  $('#memsum').textContent = `Mitglieder (${s.members.length})`;
   for (const m of s.members) mem.append(H('div', { class: 'mem', title: m.desc || '' }, avatar(m.name), H('span', {}, m.name), H('span', { class: 'dot p' + m.presence }),
     !S.me.read_only && s.poke_enabled && m.name !== s.seat ? H('button', { type: 'button', class: 'poke link', title: 'Anstupsen', 'aria-label': m.name + ' anstupsen', onclick: () => poke(m.name) }, '👋') : null));
   const t = $('#todo'); t.textContent = s.todo; t.classList.toggle('hidden', !s.todo);
@@ -344,7 +345,7 @@ function renderProps() {
 function render() {
   if (!S.s || S.s.loading) return;
   if (!chanEntries().some(c => c.key === S.cur)) S.cur = 'g';
-  renderSide();
+  renderSide(); pokeCheck();
   const props = S.view === 'props';
   $('#msgs').classList.toggle('hidden', props); $('#props').classList.toggle('hidden', !props); $('#composer').classList.toggle('hidden', props || S.me.read_only);
   $('#mhead').classList.toggle('hidden', props);
@@ -462,11 +463,20 @@ $('#input').addEventListener('keydown', ev => {
 $('#input').addEventListener('input', mentionUpdate);
 $('#input').addEventListener('click', mentionUpdate);
 $('#input').addEventListener('blur', () => setTimeout(mentionClose, 120));
-function pokeToast(r) {
-  const m = { sent: `${r.member} angestupst`, rate_limited: `${r.member}: Stups erst in ${r.secs}s`, disabled: `${r.member}: Stupsen ist aus`, offline: `${r.member} ist offline, kein Stups`, failed: `${r.member}: Stups fehlgeschlagen` };
+function pokeText(r) {
+  const m = { sent: `👋 Stups an ${r.member} gesendet`, rate_limited: `Stups an ${r.member} übersprungen: Limit 1/min`, disabled: 'Anstupsen ist am Knoten aus', offline: `${r.member} ist offline, Stups geht verloren`, failed: `Stups an ${r.member} fehlgeschlagen` };
   return m[r.result] || r.member;
 }
-async function poke(name) { try { const r = await api('/api/poke', { member: name }); toast(pokeToast(r), r.result !== 'sent'); } catch (e) { toast('Anstupsen fehlgeschlagen: ' + e.message, true); } }
+// persistent client-side status line: stays until the channel changes or 30 s pass
+function pokeLine(parts, bad) {
+  const e = $('#pokeline'); clearTimeout(pokeLine.t);
+  if (!parts.length) { e.className = 'hidden'; e.textContent = ''; S.pk = null; return; }
+  S.pk = { cur: S.cur }; e.textContent = parts.join(' · '); e.className = bad ? 'bad' : '';
+  pokeLine.t = setTimeout(() => pokeLine([]), 30000);
+}
+function pokeCheck() { if (S.pk && S.pk.cur !== S.cur) pokeLine([]); }
+const pokeParts = r => { const n = [...new Set((r.pokes || []).map(pokeText))]; if (r.skipped) n.push(`${r.skipped} weitere Erwähnung(en) ohne Stups`); for (const a of r.ambiguous || []) n.push(`mehrdeutig: ${a.candidates.join(', ')}`); return n; };
+async function poke(name) { try { const r = await api('/api/poke', { member: name }); pokeLine([pokeText(r)], r.result !== 'sent'); } catch (e) { toast('Anstupsen fehlgeschlagen: ' + e.message, true); } }
 
 async function send() {
   const ta = $('#input'), body = ta.value;
@@ -474,7 +484,7 @@ async function send() {
   if (!body.trim() || S.sending) return;
   S.sending = true; $('#sendbtn').disabled = true;
   try { const r = await api('/api/send', { channel: chanObj(S.cur), body, quote: S.quote || undefined }); ta.value = ''; S.quote = null; S.stick = true; mentionClose();
-    const n = (r.pokes || []).map(pokeToast); if (r.skipped) n.push(`${r.skipped} weitere Erwähnung(en) ohne Stups`); if (n.length) toast(n.join('; '), (r.pokes || []).some(x => x.result !== 'sent')); }
+    pokeLine(pokeParts(r), (r.pokes || []).some(x => x.result !== 'sent') || !!(r.ambiguous || []).length); }
   catch (e) { toast('Senden fehlgeschlagen: ' + e.message, true); }
   S.sending = false; $('#sendbtn').disabled = false; ta.focus();
 }
