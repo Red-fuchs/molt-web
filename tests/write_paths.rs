@@ -7,14 +7,14 @@ use std::sync::mpsc;
 
 const TOKEN: &str = "TEST-TOKEN-0123456789";
 const PW: &str = "correct horse";
-struct Env { mock: Mock, base: String }
+struct Env { mock: Mock, base: String, sim: std::sync::Arc<std::sync::Mutex<Sim>> }
 struct Sess { cookie: String, csrf: String }
 
 fn boot(read_only: bool) -> Env { boot_with(read_only, 0) }
 fn boot_with(read_only: bool, filler: usize) -> Env {
     let mut sim = Sim::new("seat-a");
     sim.add_filler(filler);
-    let (h, _) = sim.into_handler(None);
+    let (h, simh) = sim.into_handler(None);
     let m = mock::start(TOKEN, h);
     let cache = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("w{}", molt_web::auth::rand_hex(6)));
     let cfg = Config { url: Some(m.url.clone()), token: Some(TOKEN.into()), listen: "127.0.0.1:0".into(),
@@ -22,7 +22,7 @@ fn boot_with(read_only: bool, filler: usize) -> Env {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || molt_web::serve(cfg, Some(tx)).unwrap());
     let addr = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-    Env { mock: m, base: format!("http://{addr}") }
+    Env { mock: m, base: format!("http://{addr}"), sim: simh }
 }
 
 fn call(method: &str, url: &str, s: Option<&Sess>, csrf: bool, origin: Option<&str>, body: Option<Value>) -> (u16, Value) {
@@ -248,4 +248,80 @@ fn read_only_refuses_pokes() {
     assert_eq!(post(&e, &s, "/api/poke", json!({"member":"bob"})).0, 403);
     assert_eq!(post(&e, &s, "/api/send", json!({"body":"@bob"})).0, 403);
     assert!(e.mock.called("poke").is_empty() && e.mock.called("chat_send").is_empty());
+}
+
+fn msg_with(st: &Value, pred: impl Fn(&Value) -> bool) -> Option<Value> { st["msgs"].as_array().unwrap().iter().find(|m| pred(m)).cloned() }
+
+#[test]
+fn react_delete_threads_remove_file_mark_read() {
+    let e = boot(false);
+    let s = login(&e);
+    state(&e, &s, |_| true);
+    assert_eq!(post(&e, &s, "/api/send", json!({"body":"hi"})).0, 200);
+    // a message from another web user / AI on the same seat (foreign tag) and an untagged one
+    let (foreign, untagged) = { let mut m = e.sim.lock().unwrap();
+        let f = m.say_text("seat-a", "[Claude] fremd", None); let u = m.say_text("seat-a", "ohne Tag", None); (f, u) };
+    let st = state(&e, &s, |v| msg_with(v, |m| m["body"] == "hi").is_some() && msg_with(v, |m| m["id"] == foreign.as_str()).is_some());
+    let mine = msg_with(&st, |m| m["body"] == "hi").unwrap();
+    assert_eq!(mine["tag"], "alice");
+    let mid = mine["id"].as_str().unwrap().to_string();
+    // react: validation, toggle, reflected in state
+    assert_eq!(post(&e, &s, "/api/react", json!({"id":"nope","emoji":"👍"})).0, 400);
+    assert_eq!(post(&e, &s, "/api/react", json!({"id":mid,"emoji":"abc"})).0, 400);
+    assert_eq!(post(&e, &s, "/api/react", json!({"id":"0".repeat(32),"emoji":"👍"})).0, 404);
+    assert_eq!(call("POST", &format!("{}/api/react", e.base), Some(&s), false, None, Some(json!({"id":mid,"emoji":"👍"}))).0, 403);
+    assert!(e.mock.called("react_chat").is_empty());
+    assert_eq!(post(&e, &s, "/api/react", json!({"id":mid,"emoji":"👍"})).0, 200);
+    let st = state(&e, &s, |v| msg_with(v, |m| m["id"] == mid.as_str()).is_some_and(|m| m["reacted"] == json!(["👍"])));
+    assert_eq!(msg_with(&st, |m| m["id"] == mid.as_str()).unwrap()["reactions"], json!([["👍", 1]]));
+    // delete: needs confirm, own tag only
+    assert_eq!(post(&e, &s, "/api/delete", json!({"id":mid})).0, 400);
+    assert_eq!(post(&e, &s, "/api/delete", json!({"id":foreign,"confirm":true})).0, 403);
+    assert_eq!(post(&e, &s, "/api/delete", json!({"id":untagged,"confirm":true})).0, 403);
+    assert!(e.mock.called("delete_chat").is_empty());
+    assert_eq!(post(&e, &s, "/api/delete", json!({"id":mid,"confirm":true})).0, 200);
+    assert_eq!(e.mock.called("delete_chat"), vec![json!({"id":mid})]);
+    let st = state(&e, &s, |v| msg_with(v, |m| m["id"] == mid.as_str()).is_some_and(|m| m["deleted"] == true));
+    assert!(msg_with(&st, |m| m["id"] == mid.as_str()).unwrap()["body"].as_str().unwrap().contains("deleted"));
+    assert_eq!(post(&e, &s, "/api/delete", json!({"id":mid,"confirm":true})).0, 403, "already deleted");
+    // topics
+    assert_eq!(post(&e, &s, "/api/topic", json!({"name":"T1","body":"x"})).0, 200);
+    state(&e, &s, |v| v["chans"].as_array().unwrap().iter().any(|c| c["key"] == "t:T1"));
+    assert_eq!(post(&e, &s, "/api/thread", json!({"op":"close","name":"T1"})).0, 400);
+    assert_eq!(post(&e, &s, "/api/thread", json!({"op":"close","name":"Nope","confirm":true})).0, 404);
+    assert_eq!(post(&e, &s, "/api/thread", json!({"op":"close","name":"T1","confirm":true})).0, 200);
+    state(&e, &s, |v| v["chans"].as_array().unwrap().iter().any(|c| c["key"] == "t:T1" && c["closed"] == true));
+    assert_eq!(post(&e, &s, "/api/thread", json!({"op":"reopen","name":"T1","confirm":true})).0, 200);
+    assert_eq!(post(&e, &s, "/api/thread", json!({"op":"forget","name":"T1","confirm":true})).0, 400, "forget needs the typed name");
+    assert_eq!(post(&e, &s, "/api/thread", json!({"op":"forget","name":"T1","confirm":true,"confirm_name":"x"})).0, 400);
+    assert!(e.mock.called("thread_forget").is_empty());
+    assert_eq!(post(&e, &s, "/api/thread", json!({"op":"forget","name":"T1","confirm":true,"confirm_name":"T1"})).0, 200);
+    assert_eq!(e.mock.called("thread_forget"), vec![json!({"name":"T1"})]);
+    // mark_read: only known valid ids, explicit
+    assert_eq!(post(&e, &s, "/api/mark_read", json!({"ids":["bad", "f".repeat(32)]})).1["sent"], 0);
+    assert!(e.mock.called("mark_read").is_empty());
+    assert_eq!(post(&e, &s, "/api/mark_read", json!({"ids":[foreign, "bad"]})).1["sent"], 1);
+    assert_eq!(e.mock.called("mark_read"), vec![json!({"ids":[foreign]})]);
+}
+
+#[test]
+fn remove_file_only_own_upload_with_confirm() {
+    let e = boot(false);
+    let s = login(&e);
+    state(&e, &s, |_| true);
+    let other = e.sim.lock().unwrap().say_file("seat-a", "x.txt", "File", b"x", None); // same seat, but not uploaded by this web user
+    state(&e, &s, |v| msg_with(v, |m| m["id"] == other.as_str()).is_some());
+    assert_eq!(post(&e, &s, "/api/remove_file", json!({"id":other})).0, 400);
+    assert_eq!(post(&e, &s, "/api/remove_file", json!({"id":other,"confirm":true})).0, 403);
+    assert!(e.mock.called("remove_file").is_empty());
+}
+
+#[test]
+fn chat_writes_refused_read_only() {
+    let e = boot(true);
+    let s = login(&e);
+    for (p, b) in [("/api/react", json!({"id":"a".repeat(32),"emoji":"👍"})), ("/api/delete", json!({"id":"a".repeat(32),"confirm":true})),
+        ("/api/remove_file", json!({"id":"a".repeat(32),"confirm":true})), ("/api/thread", json!({"op":"close","name":"x","confirm":true})), ("/api/mark_read", json!({"ids":["a"]}))] {
+        assert_eq!(post(&e, &s, p, b).0, 403, "{p}");
+    }
 }

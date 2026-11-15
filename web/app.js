@@ -125,9 +125,14 @@ function renderMsgs() {
   $('#ctitle').textContent = ent ? ent.label : S.cur;
   $('#cinfo').textContent = ent ? `${ent.count} Nachrichten` : '';
   $('#markread').classList.toggle('hidden', !!(S.me.read_only) || !(ent && ent.unread));
+  const isT = S.cur.startsWith('t:') && !S.me.read_only && !!ent && !String(ent.label).endsWith('(neu)');
+  $('#tclose').classList.toggle('hidden', !isT || !!ent.closed); $('#treopen').classList.toggle('hidden', !isT || !ent.closed); $('#tforget').classList.toggle('hidden', !isT);
   const msgs = s.msgs.filter(m => m.chan === S.cur);
   const byId = Object.fromEntries(s.msgs.map(m => [m.id, m]));
-  const key = S.cur + '|' + Object.keys(S.pend).join() + '|' + JSON.stringify(msgs.map(m => [m.id, m.reactions, m.file?.upload?.local, m.file?.upload?.persistent]));
+  const key = S.cur + '|' + Object.keys(S.pend).join() + '|' + JSON.stringify(msgs.map(m => [m.id, m.body, m.deleted, m.tag, m.reactions, m.reacted, m.file?.upload?.local, m.file?.upload?.persistent, m.file?.upload?.available]));
+  const sel = window.getSelection && window.getSelection();
+  // keep a text selection / open picker alive: skip the redraw, the next poll retries
+  if (key !== lastKey && ((sel && !sel.isCollapsed && list.contains(sel.anchorNode)) || list.querySelector('.picker'))) return;
   if (key === lastKey) return; lastKey = key;
   const near = list.scrollHeight - list.scrollTop - list.clientHeight < 80, keep = list.scrollTop;
   list.replaceChildren();
@@ -139,12 +144,18 @@ function renderMsgs() {
       avatar(m.from),
       H('div', { class: 'b' },
         H('div', { class: 'hd' }, H('span', { class: 'nm' }, m.from), m.tag ? H('span', { class: 'tag' }, m.tag) : null, H('span', { class: 'ts' }, fmtTime(m.ts)),
-          S.me.read_only || m.kind === 'system' ? null : H('button', { class: 'link rep', type: 'button', onclick: () => setQuote(m.id) }, '↩ Antworten')),
+          S.me.read_only || m.kind === 'system' ? null : H('span', { class: 'acts' },
+            m.deleted ? null : H('button', { class: 'link', type: 'button', title: 'Reagieren', 'aria-label': 'Reagieren', onclick: ev => reactPicker(ev.currentTarget.parentNode, m) }, '☺'),
+            H('button', { class: 'link rep', type: 'button', onclick: () => setQuote(m.id) }, '↩ Antworten'),
+            isOwn(m) ? H('button', { class: 'link', type: 'button', title: 'Löschen', 'aria-label': 'Nachricht löschen', onclick: () => deleteDialog(m) }, '🗑') : null,
+            isOwn(m) && m.file ? H('button', { class: 'link', type: 'button', title: 'Freigabe zurückziehen', 'aria-label': 'Freigabe zurückziehen', onclick: () => unshareDialog(m) }, '⛔') : null)),
         m.quote ? H('div', { class: 'q', onclick: () => { const t = document.getElementById('m-' + m.quote); if (t) { t.scrollIntoView({ block: 'center' }); t.classList.add('hl'); setTimeout(() => t.classList.remove('hl'), 1500); } } },
           q ? `${q.from}${q.tag ? ' [' + q.tag + ']' : ''}: ${q.body.split('\n')[0].slice(0, 120)}` : 'Nachricht (nicht mehr geladen)') : null,
-        m.body ? renderBody(m.body) : null,
+        m.deleted ? H('div', { class: 'gone' }, m.body || 'gelöscht') : m.body ? renderBody(m.body) : null,
         m.file ? renderFile(m) : null,
-        m.reactions?.length ? H('div', {}, m.reactions.map(([e, n]) => H('span', { class: 'rx' }, `${e} ${n}`))) : null));
+        m.reactions?.length ? H('div', {}, m.reactions.map(([e, n]) => S.me.read_only
+          ? H('span', { class: 'rx' }, `${e} ${n}`)
+          : H('button', { type: 'button', class: 'rx' + ((m.reacted || []).includes(e) ? ' mine' : ''), title: 'Reaktion umschalten', onclick: () => react(m.id, e) }, `${e} ${n}`))) : null));
     list.append(el);
   }
   for (const [id, p] of Object.entries(S.pend)) {
@@ -165,6 +176,32 @@ const btn = (t, f, cls) => H('button', { type: 'button', class: cls || '', oncli
 const cancelBtn = () => btn('Abbrechen', closeModal);
 document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && !$('#modal').classList.contains('hidden')) closeModal(); });
 $('#modal').addEventListener('mousedown', ev => { if (ev.target === $('#modal')) closeModal(); });
+const REACTS = ['👍', '❤️', '😂', '🎉', '🙏', '👀'];
+// own = this web user's tag on the shared seat (server re-checks; this only decides which buttons to show)
+const isOwn = m => !S.me.read_only && !m.deleted && m.kind !== 'system' && m.from === S.s.seat && (m.file ? !!m.own_file : m.tag === S.me.tag);
+async function react(id, emoji) { try { await api('/api/react', { id, emoji }); } catch (e) { toast('Reaktion fehlgeschlagen: ' + e.message, true); } }
+function reactPicker(host, m) {
+  const old = host.querySelector('.picker'); if (old) { old.remove(); return; }
+  const p = H('div', { class: 'picker', role: 'menu' }, REACTS.map(e => H('button', { type: 'button', class: 'link', role: 'menuitem', onclick: () => { p.remove(); react(m.id, e); } }, e)));
+  p.addEventListener('keydown', ev => { if (ev.key === 'Escape') { p.remove(); } });
+  host.append(p); p.querySelector('button').focus();
+}
+function confirmDialog(title, warn, label, path, body, done) {
+  const err = H('p', { class: 'err' });
+  const go = async () => { try { await api(path, { ...body, confirm: true }); closeModal(); toast(done); } catch (e) { err.textContent = e.message; } };
+  modal(title, [H('p', { class: 'warn' }, warn), err], [cancelBtn(), btn(label, go, 'dng')]);
+}
+const deleteDialog = m => confirmDialog('Nachricht löschen', 'Der Text wird für alle Mitglieder gelöscht. Nicht rückgängig zu machen.', 'Löschen', '/api/delete', { id: m.id }, 'Nachricht gelöscht');
+const unshareDialog = m => confirmDialog('Freigabe zurückziehen', `Die Datei "${m.file.name}" ist danach für niemanden mehr abrufbar.`, 'Zurückziehen', '/api/remove_file', { id: m.id }, 'Freigabe zurückgezogen');
+function threadDialog(op) {
+  const name = S.cur.slice(2);
+  if (op === 'forget') {
+    const n = H('input', { placeholder: 'Themenname zur Bestätigung' }), err = H('p', { class: 'err' });
+    const go = async () => { try { await api('/api/thread', { op, name, confirm: true, confirm_name: n.value }); closeModal(); S.cur = 'g'; S.extra = S.extra.filter(x => x !== name); toast('Thema auf diesem Sitz vergessen'); render(); } catch (e) { err.textContent = e.message; } };
+    modal('Thema vergessen (nur dieser Sitz)', [H('p', { class: 'warn' }, `Alle lokalen Nachrichten von "${name}" werden gelöscht; die anderen Mitglieder behalten das Thema. Zur Bestätigung den Namen eintippen.`), n, err], [cancelBtn(), btn('Vergessen', go, 'dng')]);
+  } else confirmDialog(op === 'close' ? 'Thema schließen' : 'Thema öffnen', op === 'close' ? 'Gilt für ALLE Mitglieder: keine neuen Nachrichten, das Thema endet nach einem Tag; jeder kann es vorher wieder öffnen.' : 'Das Thema nimmt wieder Nachrichten an (für alle).', op === 'close' ? 'Schließen' : 'Öffnen', '/api/thread', { op, name }, op === 'close' ? 'Thema geschlossen' : 'Thema geöffnet');
+}
+for (const op of ['close', 'reopen', 'forget']) $('#t' + op).addEventListener('click', () => threadDialog(op));
 const WARN = 'Echte Signatur, nicht rückgängig zu machen.';
 
 function topicDialog() {
@@ -444,7 +481,13 @@ async function send() {
 $('#composer').addEventListener('submit', ev => { ev.preventDefault(); send(); });
 $('#input').addEventListener('keydown', ev => { if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && ev.keyCode !== 229) { ev.preventDefault(); send(); } });
 $('#newtopic').addEventListener('click', () => { if (!S.me.read_only) topicDialog(); else toast('Nur-Lesen-Modus', true); });
-async function markRead() { try { await api('/api/mark_read', { channel: chanObj(S.cur) }); } catch (e) { toast('Fehler: ' + e.message, true); } }
+// receipts only for messages of others that are actually on screen right now
+async function markRead() {
+  const box = $('#msgs').getBoundingClientRect();
+  const ids = [...document.querySelectorAll('#msgs .m[id]')].filter(e => { const r = e.getBoundingClientRect(); return r.bottom > box.top && r.top < box.bottom; }).map(e => e.id.slice(2));
+  const mine = new Set(S.s.msgs.filter(m => m.from === S.s.seat).map(m => m.id));
+  const v = ids.filter(i => !mine.has(i));
+  try { if (v.length) { await api('/api/mark_read', { ids: v }); toast(`${v.length} als gelesen markiert`); } else await api('/api/mark_read', { channel: chanObj(S.cur) }); } catch (e) { toast('Fehler: ' + e.message, true); } }
 $('#markread').addEventListener('click', markRead);
 $('#menu').addEventListener('click', () => $('#side').classList.toggle('open'));
 document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => { S.view = b.dataset.view; render(); }));

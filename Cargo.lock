@@ -522,7 +522,7 @@ dependencies = [
 [[package]]
 name = "molt-client"
 version = "0.1.0"
-source = "git+https://github.com/Red-fuchs/molt-tui#69fe6c04add0ca3666dd934fea880ed54d82b4de"
+source = "git+https://github.com/Red-fuchs/molt-tui#60332a54bca3f4a78b53510054715b1c18abc4b3"
 dependencies = [
  "serde_json",
  "sha2",

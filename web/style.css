@@ -86,3 +86,10 @@ pre.pv{white-space:pre-wrap;overflow-wrap:anywhere}
 #mentions li[aria-selected=true]{background:var(--acc);color:var(--accfg)}
 .mem button.poke{margin-left:auto;padding:0 .4em;font-size:.85em}
 .m.me-mention{border-left:3px solid var(--acc);background:var(--sel)}
+
+.m .acts{display:flex;gap:.2em;visibility:hidden;margin-left:auto;position:relative}.m:hover .acts,.m:focus-within .acts{visibility:visible}
+.m .acts button{padding:0 .35em}.m .rep{margin-left:0}
+.picker{position:absolute;right:0;top:1.6em;z-index:3;display:flex;gap:.2em;background:var(--bg3);border:1px solid var(--mut);border-radius:8px;padding:.2em}
+.picker button{font-size:1.1em}
+button.rx{border:0;color:inherit;cursor:pointer;font:inherit;font-size:.85em}button.rx.mine{outline:1px solid var(--mut)}
+.m .gone{color:var(--mut);font-style:italic}

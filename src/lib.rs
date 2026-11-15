@@ -31,7 +31,7 @@ struct Shared {
     tx: watch::Sender<Arc<String>>, shutdown: watch::Sender<bool>,
     kdf: Semaphore, uploads: Semaphore, persistent: RwLock<HashSet<String>>,
     files: RwLock<HashMap<String, FileMeta>>, images: RwLock<HashMap<String, String>>,
-    msg_ids: RwLock<HashSet<String>>, pinfo: RwLock<HashMap<u64, snap::PropInfo>>, seat: RwLock<String>,
+    msg_ids: RwLock<HashSet<String>>, own: RwLock<HashMap<String, (Option<String>, bool)>>, shared_by: Mutex<HashMap<String, String>>, topics: RwLock<HashSet<String>>, pinfo: RwLock<HashMap<u64, snap::PropInfo>>, seat: RwLock<String>,
     nudge: Mutex<mpsc::Sender<()>>, dl: tokio::sync::Mutex<()>,
     roster: RwLock<Vec<molt_client::model::Member>>, poke_on: RwLock<bool>, gates: Mutex<HashMap<String, molt_client::poke::PokeGate>>,
 }
@@ -204,7 +204,9 @@ async fn send(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<V
         if !st.msg_ids.read().unwrap().contains(q) { return Err(e(StatusCode::BAD_REQUEST, "zitierte Nachricht unbekannt")) }
         a["quote"] = json!(q);
     }
+    let ck = b["channel"]["kind"].as_str().unwrap_or("group").to_string();
     call(&st, "chat_send", a).await?;
+    audit(&s.user, "chat_send", &ck);
     // chat is out; pokes are best effort and never change the outcome (max 2 per message, 1/min per target and user)
     let (pokes, skipped) = poke_run(&st, &s.user, &body).await;
     let _ = st.nudge.lock().unwrap().send(());
@@ -283,6 +285,7 @@ async fn vote(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<V
     if !open { return Err(e(StatusCode::CONFLICT, "Vorschlag ist nicht mehr offen")) }
     if !todo { return Err(e(StatusCode::CONFLICT, "Du hast hier schon abgestimmt")) }
     let r = call(&st, if ap { "approve" } else { "decline" }, compose::vote_args(id, &note(&b)?, &s.user)).await?;
+    audit(&s.user, if ap { "approve" } else { "decline" }, &format!("proposal {id}"));
     let _ = st.nudge.lock().unwrap().send(());
     Ok(Json(json!({"ok":true,"state":r.get("state"),"approvals":r.get("approvals"),"threshold":r.get("threshold")})))
 }
@@ -295,6 +298,7 @@ async fn withdraw(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Js
     if !open { return Err(e(StatusCode::CONFLICT, "Vorschlag ist nicht mehr offen")) }
     if !mine { return Err(e(StatusCode::FORBIDDEN, "Nur eigene Vorschläge können zurückgezogen werden")) }
     let r = call(&st, "withdraw", compose::vote_args(id, &note(&b)?, &s.user)).await?;
+    audit(&s.user, "withdraw", &format!("proposal {id}"));
     let _ = st.nudge.lock().unwrap().send(());
     Ok(Json(json!({"ok":true,"state":r.get("state")})))
 }
@@ -349,6 +353,7 @@ async fn topic(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<
     if body.trim().is_empty() { return Err(e(StatusCode::BAD_REQUEST, "Erste Nachricht fehlt")) }
     if body.chars().count() > 16000 { return Err(e(StatusCode::BAD_REQUEST, "Nachricht zu lang")) }
     call(&st, "chat_send", json!({"body": tag_body(&body, &s.user), "channel": {"kind":"topic","name":name}})).await?;
+    audit(&s.user, "chat_send", &format!("t:{name}"));
     let _ = st.nudge.lock().unwrap().send(());
     Ok(Json(json!({"ok":true,"key":format!("t:{name}")})))
 }
@@ -392,7 +397,7 @@ async fn upload(State(st): S, h: HeaderMap, Query(q): Query<HashMap<String, Stri
     if let Some(c) = &chan { a["channel"] = c.clone() }
     let r = match call(&st, "share_file", a).await { Ok(r) => r, Err(x) => { let _ = std::fs::remove_dir_all(&dir); return Err(x) } };
     let id = r.get("id").and_then(Value::as_str).filter(|i| i.len() == 32 && i.bytes().all(|c| c.is_ascii_hexdigit())).map(str::to_string);
-    if let Some(i) = &id { let _ = std::fs::write(dir.join(".id"), i); }
+    if let Some(i) = &id { let _ = std::fs::write(dir.join(".id"), i); st.shared_by.lock().unwrap().insert(i.clone(), s.user.clone()); }
     // a share has no text of its own: a tagged line next to it says who shared it
     let line = if text.is_empty() { format!("📎 {name}") } else { text };
     let mut m = json!({"body": tag_body(&line, &s.user)});
@@ -402,8 +407,86 @@ async fn upload(State(st): S, h: HeaderMap, Query(q): Query<HashMap<String, Stri
     Ok(Json(json!({"ok":true,"id":id,"name":name,"tagged":sent})))
 }
 
+/// Per-user audit line (stderr/journal): who signed what. Never contains message bodies.
+fn audit(user: &str, tool: &str, target: &str) { eprintln!("molt-web: audit user={} tool={} target={}", molt_client::text::one(user), tool, molt_client::text::one(target)) }
+
+fn msg_id(b: &Value) -> Result<String, E> {
+    let i = b["id"].as_str().unwrap_or("");
+    if molt_client::chat::valid_id(i) { Ok(i.to_string()) } else { Err(e(StatusCode::BAD_REQUEST, "ungültige Nachrichten-ID")) }
+}
+
+async fn react(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    let id = msg_id(&b)?;
+    let emoji = b["emoji"].as_str().unwrap_or("");
+    if !molt_client::chat::valid_emoji(emoji) { return Err(e(StatusCode::BAD_REQUEST, "ungültiges Emoji")) }
+    if !st.msg_ids.read().unwrap().contains(&id) { return Err(e(StatusCode::NOT_FOUND, "Nachricht unbekannt")) }
+    call(&st, "react_chat", json!({"id":id,"emoji":emoji})).await?;
+    audit(&s.user, "react_chat", &id);
+    let _ = st.nudge.lock().unwrap().send(());
+    Ok(Json(json!({"ok":true})))
+}
+
+/// The seat is shared by all web users and the AIs: only messages carrying THIS user's tag may be deleted.
+async fn delete_msg(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    need_confirm(&b)?;
+    let id = msg_id(&b)?;
+    let own = st.own.read().unwrap().get(&id).cloned();
+    match own {
+        Some((Some(t), false)) if t == s.user => {}
+        Some(_) => return Err(e(StatusCode::FORBIDDEN, "Nur eigene Nachrichten (mit deinem Absender-Tag) lassen sich löschen")),
+        None => return Err(e(StatusCode::FORBIDDEN, "Nur eigene, noch vorhandene Nachrichten lassen sich löschen")),
+    }
+    call(&st, "delete_chat", json!({"id":id})).await?;
+    audit(&s.user, "delete_chat", &id);
+    let _ = st.nudge.lock().unwrap().send(());
+    Ok(Json(json!({"ok":true})))
+}
+
+/// Withdraw an own share. A share has no tag of its own, so only shares uploaded by this user via this process (since its start) qualify.
+async fn remove_file(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    need_confirm(&b)?;
+    let id = msg_id(&b)?;
+    if !st.own.read().unwrap().get(&id).is_some_and(|o| o.1) { return Err(e(StatusCode::FORBIDDEN, "Nur eigene Freigaben lassen sich zurückziehen")) }
+    if st.shared_by.lock().unwrap().get(&id) != Some(&s.user) { return Err(e(StatusCode::FORBIDDEN, "Nur Freigaben, die du über diese Web-Oberfläche geteilt hast")) }
+    call(&st, "remove_file", json!({"id":id})).await?;
+    audit(&s.user, "remove_file", &id);
+    let _ = st.nudge.lock().unwrap().send(());
+    Ok(Json(json!({"ok":true})))
+}
+
+/// op: close | reopen | forget. forget (this seat only, deletes local messages) additionally needs `confirm_name` equal to the topic name.
+async fn thread(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
+    let s = guard(&st, &h, true)?;
+    need_confirm(&b)?;
+    let name = b["name"].as_str().unwrap_or("");
+    if name.trim().is_empty() || name.trim() != name || name.chars().count() > 64 { return Err(e(StatusCode::BAD_REQUEST, "ungültiger Themenname")) }
+    if !st.topics.read().unwrap().contains(name) { return Err(e(StatusCode::NOT_FOUND, "Thema unbekannt")) }
+    let tool = match b["op"].as_str() {
+        Some("close") => "thread_close",
+        Some("reopen") => "thread_reopen",
+        Some("forget") => { if b["confirm_name"].as_str() != Some(name) { return Err(e(StatusCode::BAD_REQUEST, "Zum Vergessen den Themennamen bestätigen")) } "thread_forget" }
+        _ => return Err(e(StatusCode::BAD_REQUEST, "op: close, reopen oder forget")),
+    };
+    call(&st, tool, json!({"name":name})).await?;
+    audit(&s.user, tool, &format!("t:{name}"));
+    let _ = st.nudge.lock().unwrap().send(());
+    Ok(Json(json!({"ok":true})))
+}
+
 async fn mark_read(State(st): S, h: HeaderMap, Json(b): Json<Value>) -> Result<Json<Value>, E> {
-    guard(&st, &h, true)?;
+    let s = guard(&st, &h, true)?;
+    if let Some(ids) = b["ids"].as_array() {
+        // receipts only for these message ids (the browser sends what the user actually looked at)
+        let known = st.msg_ids.read().unwrap().clone();
+        let v: Vec<&str> = ids.iter().filter_map(Value::as_str).filter(|i| molt_client::chat::valid_id(i) && known.contains(*i)).take(200).collect();
+        if v.is_empty() { return Ok(Json(json!({"ok":true,"sent":0}))) }
+        call(&st, "mark_read", json!({"ids":v})).await?;
+        audit(&s.user, "mark_read", &format!("{} ids", v.len()));
+        return Ok(Json(json!({"ok":true,"sent":v.len()})));
+    }
     let a = chan_arg(&b["channel"])?.map_or(json!({}), |c| json!({"channel": c}));
     call(&st, "mark_channel_read", a).await?;
     let _ = st.nudge.lock().unwrap().send(());
@@ -462,6 +545,8 @@ fn poller(st: Arc<Shared>, m: Mcp, rx: mpsc::Receiver<()>) {
                 *st.poke_on.write().unwrap() = f.state["poke_enabled"] == json!(true);
                 *st.pinfo.write().unwrap() = f.pinfo;
                 *st.seat.write().unwrap() = f.state["seat"].as_str().unwrap_or("").to_string();
+                *st.own.write().unwrap() = f.own;
+                *st.topics.write().unwrap() = f.state["chans"].as_array().into_iter().flatten().filter_map(|c| c["key"].as_str().and_then(|k| k.strip_prefix("t:")).map(str::to_string)).collect();
                 *st.msg_ids.write().unwrap() = f.state["msgs"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str().map(str::to_string)).collect();
                 *st.persistent.write().unwrap() = f.state["msgs"].as_array().into_iter().flatten()
                     .filter(|x| x["file"]["upload"]["persistent"] == json!(true)).filter_map(|x| x["id"].as_str().map(str::to_string)).collect();
@@ -506,6 +591,10 @@ fn router(st: Arc<Shared>) -> Router {
         .route("/api/send", post(send))
         .route("/api/poke", post(poke))
         .route("/api/mark_read", post(mark_read))
+        .route("/api/react", post(react))
+        .route("/api/delete", post(delete_msg))
+        .route("/api/remove_file", post(remove_file))
+        .route("/api/thread", post(thread))
         .route("/api/upload", post(upload))
         .route("/api/proposal/{id}", get(proposal))
         .route("/api/vote", post(vote))
@@ -536,7 +625,7 @@ pub fn serve(mut cfg: Config, ready: Option<mpsc::Sender<SocketAddr>>) -> Result
     let (tx, _rx) = watch::channel(Arc::new(json!({"loading":true}).to_string()));
     let (sdtx, _sdrx) = watch::channel(false);
     let st = Arc::new(Shared { cfg: cfg.clone(), sessions: Sessions::default(), limiter: Limiter::default(), shutdown: sdtx, kdf: Semaphore::new(2), uploads: Semaphore::new(2), persistent: Default::default(), worker: Arc::new(worker), tx,
-        files: Default::default(), images: Default::default(), msg_ids: Default::default(), pinfo: Default::default(), seat: Default::default(), nudge: Mutex::new(ntx), dl: Default::default(), roster: Default::default(), poke_on: Default::default(), gates: Default::default() });
+        files: Default::default(), images: Default::default(), msg_ids: Default::default(), own: Default::default(), shared_by: Default::default(), topics: Default::default(), pinfo: Default::default(), seat: Default::default(), nudge: Mutex::new(ntx), dl: Default::default(), roster: Default::default(), poke_on: Default::default(), gates: Default::default() });
     let st2 = st.clone();
     std::thread::spawn(move || poller(st2, poll, nrx));
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build().map_err(|e| e.to_string())?;

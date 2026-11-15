@@ -6,7 +6,9 @@ use std::collections::HashMap;
 
 /// Per-proposal facts the write endpoints check before calling the daemon: (open, still to vote, own and pending).
 pub type PropInfo = (bool, bool, bool);
-pub struct Fetched { pub pinfo: HashMap<u64, PropInfo>, pub state: Value, pub files: HashMap<String, FileMeta>, pub images: HashMap<String, String>, pub roster: Vec<Member> }
+pub struct Fetched { pub pinfo: HashMap<u64, PropInfo>, pub state: Value, pub files: HashMap<String, FileMeta>, pub images: HashMap<String, String>, pub roster: Vec<Member>,
+    /// seat-authored, not deleted messages: id -> (sender tag, is a file share). The seat is shared, so the tag decides who may delete/withdraw.
+    pub own: HashMap<String, (Option<String>, bool)> }
 
 pub fn ckey(c: &Chan) -> String {
     match c { Chan::Group => "g".into(), Chan::Topic(n) => format!("t:{n}"), Chan::Patch(i) => format!("p:{i}") }
@@ -44,6 +46,7 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
     let mut by: HashMap<String, Vec<&Msg>> = HashMap::new();
     for m in &msgs { by.entry(ckey(&m.chan)).or_default().push(m) }
     let mut files = HashMap::new();
+    let mut own = HashMap::new();
     let mut out = vec![];
     for (_, mut v) in by {
         v.sort_by_key(|m| m.ts);
@@ -51,7 +54,8 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
         for m in v.into_iter().skip(skip) {
             let (tag, body) = split_tag(&m.body);
             let mut j = json!({"id":m.id,"from":m.from,"ts":m.ts,"kind":m.kind,"chan":ckey(&m.chan),"tag":tag,"body":cap(body),
-                "quote":m.quote,"reactions":m.reactions,"mentions":molt_client::mention::extract(body, &mem)});
+                "quote":m.quote,"reactions":m.reactions,"reacted":m.reacted(&status.member),"deleted":m.deleted,"own_file":m.file.is_some() && molt_client::chat::is_own(m, &status.member),"mentions":molt_client::mention::extract(body, &mem)});
+            if molt_client::chat::is_own(m, &status.member) { own.insert(m.id.clone(), (tag.map(str::to_string), m.file.is_some())); }
             if let Some(f) = &m.file {
                 let u = ups.iter().find(|u| u.id == m.id);
                 j["file"] = json!({"name":f.name,"kind":f.kind,"size":f.size,"image":f.kind.eq_ignore_ascii_case("image") && is_image_name(&f.name),
@@ -63,7 +67,7 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
     }
     out.sort_by_key(|j| j["ts"].as_i64().unwrap_or(0));
 
-    let chans_j: Vec<Value> = entries.iter().map(|e| json!({"key":ckey(&e.chan),"label":e.label,"section":e.section,"unread":e.unread,"count":e.count,
+    let chans_j: Vec<Value> = entries.iter().map(|e| json!({"key":ckey(&e.chan),"label":e.label,"section":e.section,"unread":e.unread,"count":e.count,"closed":chans.iter().any(|c| c.chan == e.chan && c.closed),
         "chan": e.chan.to_json().unwrap_or(json!({"kind":"group"}))})).collect();
     let mut sorted: Vec<&Prop> = props.iter().collect();
     sorted.sort_by(|a, b| b.open().cmp(&a.open()).then(b.id.cmp(&a.id)));
@@ -80,7 +84,7 @@ pub fn build(st: &Value, chat: &Value, props: &Value, acts: &Value, members: &Va
     let state = json!({"name":status.name,"seat":status.member,"retention_days":st.get("chat_retention_days"),
         "health":{"relays":status.relays,"missing_relays":status.missing_relays,"diverged":status.diverged,"lag":status.lag,"active_1h":status.active_1h},
         "wiki_rev":wiki_rev,"chans":chans_j,"msgs":out,"props":props_j,"members":mem_j,"todo":todo});
-    Fetched { pinfo, state, files, images, roster: mem }
+    Fetched { pinfo, state, files, images, roster: mem, own }
 }
 
 const MAX_DETAIL: usize = 60_000;
