@@ -598,7 +598,9 @@ fn poller(st: Arc<Shared>, m: Mcp, rx: mpsc::Receiver<()>) {
             Ok(f) => {
                 *st.files.write().unwrap() = f.files;
                 *st.images.write().unwrap() = f.images;
-                *st.roster.write().unwrap() = f.roster;
+                // engine presence: 0 = online, 1 = stale, 2 = offline; molt-client's poke/mention
+                // code reads `presence == 0` as offline, so hand it its own convention (0 = offline, 1 = reachable).
+                *st.roster.write().unwrap() = f.roster.iter().map(|m| { let mut m = m.clone(); m.presence = if m.presence >= 2 { 0 } else { 1 }; m }).collect();
                 *st.poke_on.write().unwrap() = f.state["poke_enabled"] == json!(true);
                 *st.pinfo.write().unwrap() = f.pinfo;
                 *st.seat.write().unwrap() = f.state["seat"].as_str().unwrap_or("").to_string();
